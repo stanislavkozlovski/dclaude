@@ -14,6 +14,8 @@ env:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    env:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -55,9 +57,7 @@ jobs:
             "${{ steps.meta.outputs.asset_path }}" \
             "${{ steps.meta.outputs.checksum_path }}"
       - name: Update tap formula
-        if: secrets.HOMEBREW_TAP_TOKEN != ''
-        env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
         run: |
           tap_dir="${RUNNER_TEMP}/homebrew-tap"
           git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${HOMEBREW_TAP_REPO}.git" "$tap_dir"

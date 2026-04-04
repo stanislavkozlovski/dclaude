@@ -41,7 +41,7 @@ jobs:
           ./dcodex --version
 
   release_from_main:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'github-actions[bot]' && !startsWith(github.event.head_commit.message, 'chore: release v')
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'github-actions[bot]' && !startsWith(github.event.head_commit.message, 'chore: release v') }}
     needs:
       - lint
       - smoke
