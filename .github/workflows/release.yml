@@ -1,0 +1,124 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish
+        required: true
+        type: string
+      target_ref:
+        description: Git ref to package, defaults to the tag
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+      target_ref:
+        required: false
+        type: string
+    secrets:
+      HOMEBREW_TAP_TOKEN:
+        required: false
+
+permissions:
+  contents: write
+
+env:
+  HOMEBREW_TAP_REPO: stanislavkozlovski/homebrew-tap
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - name: Resolve release source ref
+        id: source
+        run: |
+          target_ref="${{ inputs.target_ref }}"
+          if [ -z "$target_ref" ]; then
+            tag="${{ inputs.tag }}"
+            if [ -n "$tag" ]; then
+              target_ref="$tag"
+            else
+              target_ref="${GITHUB_REF}"
+            fi
+          fi
+          echo "target_ref=$target_ref" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ steps.source.outputs.target_ref }}
+      - name: Resolve release metadata
+        id: meta
+        run: |
+          tag="${{ inputs.tag }}"
+          if [ -z "$tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+          fi
+          version="${tag#v}"
+          asset_name="dclaude-v${version}.tar.gz"
+          asset_path="dist/${asset_name}"
+          checksum_path="${asset_path}.sha256"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "asset_name=$asset_name" >> "$GITHUB_OUTPUT"
+          echo "asset_path=$asset_path" >> "$GITHUB_OUTPUT"
+          echo "checksum_path=$checksum_path" >> "$GITHUB_OUTPUT"
+      - name: Verify tag matches VERSION
+        run: |
+          test "${{ steps.meta.outputs.version }}" = "$(tr -d '[:space:]' < docs/VERSION)"
+      - name: Build release tarball
+        id: package
+        run: |
+          mkdir -p dist
+          git archive \
+            --format=tar.gz \
+            --prefix="dclaude-${{ steps.meta.outputs.version }}/" \
+            "${{ steps.source.outputs.target_ref }}" \
+            > "${{ steps.meta.outputs.asset_path }}"
+          sha256="$(sha256sum "${{ steps.meta.outputs.asset_path }}" | awk '{print $1}')"
+          printf '%s  %s\n' "$sha256" "${{ steps.meta.outputs.asset_name }}" > "${{ steps.meta.outputs.checksum_path }}"
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${{ steps.meta.outputs.tag }}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${{ steps.meta.outputs.tag }}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber \
+              "${{ steps.meta.outputs.asset_path }}" \
+              "${{ steps.meta.outputs.checksum_path }}"
+          else
+            gh release create "${{ steps.meta.outputs.tag }}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${{ steps.meta.outputs.tag }}" \
+              --notes "Release ${{ steps.meta.outputs.tag }}" \
+              "${{ steps.meta.outputs.asset_path }}" \
+              "${{ steps.meta.outputs.checksum_path }}"
+          fi
+      - name: Update tap formula
+        if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
+        run: |
+          tap_dir="${RUNNER_TEMP}/homebrew-tap"
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${HOMEBREW_TAP_REPO}.git" "$tap_dir"
+          cd "$tap_dir"
+          python3 util/update_dclaude_formula.py \
+            "${{ steps.meta.outputs.version }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --sha256 "${{ steps.package.outputs.sha256 }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            exit 0
+          fi
+          git add Formula/dclaude.rb
+          git commit -m "dclaude v${{ steps.meta.outputs.version }}"
+          git push origin main

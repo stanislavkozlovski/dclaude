@@ -1,0 +1,7 @@
+# Read-only directories mounted into the container.
+# Each entry is an absolute path or starts with ~/ (resolved to $HOME).
+# Paths are bind-mounted read-only at the same absolute path inside the container.
+#
+# read_only_mounts:
+#   - ~/Desktop
+#   - ~/Downloads
