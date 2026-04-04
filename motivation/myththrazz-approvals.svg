@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="311" viewBox="0 0 1280 311" role="img" aria-labelledby="title desc">
+  <title id="title">Marcin Dudek post about repetitive permission prompts</title>
+  <desc id="desc">A recreated screenshot card of a post complaining that the tool keeps asking for permission to write to temporary paths even when those paths are already allowed.</desc>
+  <rect width="1280" height="311" fill="#ffffff"/>
+  <line x1="0" y1="309" x2="1280" y2="309" stroke="#d9d9d9" stroke-width="2"/>
+  <circle cx="80" cy="72" r="36" fill="#9bb38a"/>
+  <text x="140" y="51" font-family="Arial, Helvetica, sans-serif" font-size="28" font-weight="700" fill="#111111">Marcin Dudek</text>
+  <circle cx="361" cy="39" r="12" fill="#1d9bf0"/>
+  <text x="355" y="46" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" fill="#ffffff">v</text>
+  <text x="390" y="51" font-family="Arial, Helvetica, sans-serif" font-size="28" fill="#536471">@MythThrazz · 18m</text>
+
+  <text x="140" y="100" font-family="Arial, Helvetica, sans-serif" font-size="31" fill="#111111">
+    <tspan x="140" dy="0">At the same time it will be routinely stopping to ask if it can write to fucking</tspan>
+    <tspan x="140" dy="42">/tmp (even though he did multiple times before and even though its</tspan>
+    <tspan x="140" dy="42">whitelisted on both global and project level) 😂</tspan>
+  </text>
+
+  <circle cx="155" cy="264" r="15" fill="none" stroke="#536471" stroke-width="3"/>
+  <path d="M375 252 l18 0 0 -12 16 16 -16 16 0 -12 -18 0 z" fill="none" stroke="#536471" stroke-width="3" stroke-linejoin="round"/>
+  <circle cx="630" cy="264" r="15" fill="none" stroke="#536471" stroke-width="3"/>
+  <path d="M850 243 v42 M866 255 v30 M882 236 v49 M898 248 v37" stroke="#536471" stroke-width="4"/>
+  <text x="915" y="271" font-family="Arial, Helvetica, sans-serif" font-size="22" fill="#536471">78</text>
+  <path d="M1120 242 l20 0 0 38 -20 -12 -20 12 0 -38 z" fill="none" stroke="#536471" stroke-width="3"/>
+  <path d="M1185 278 l0 -34 M1185 244 l-10 10 M1185 244 l10 10" fill="none" stroke="#536471" stroke-width="3" stroke-linecap="round"/>
+</svg>
