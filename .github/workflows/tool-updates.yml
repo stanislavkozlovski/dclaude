@@ -1,0 +1,52 @@
+name: tool-updates
+
+on:
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh_tool_pins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Refresh pinned tool versions
+        run: python3 scripts/sync_tool_versions.py --update
+
+      - name: Detect changes
+        id: diff
+        run: |
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build updated image
+        if: steps.diff.outputs.changed == 'true'
+        run: docker build -t dclaude:tool-updates .
+
+      - name: Smoke updated tools
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          docker run --rm dclaude:tool-updates cx --version
+          docker run --rm dclaude:tool-updates claude --version
+          docker run --rm dclaude:tool-updates bash -lc 'codex --version && codex --dangerously-bypass-approvals-and-sandbox --help >/dev/null'
+
+      - name: Create pull request
+        if: steps.diff.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: chore/tool-version-updates
+          delete-branch: true
+          commit-message: chore: refresh pinned tool versions
+          title: chore: refresh pinned tool versions
+          body: |
+            Refresh pinned upstream tool versions in `Dockerfile` and the matching docs.
+
+            Updated by `.github/workflows/tool-updates.yml`.
