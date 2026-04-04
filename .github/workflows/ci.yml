@@ -1,0 +1,98 @@
+name: ci
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate VERSION format
+        run: grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' docs/VERSION
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Shellcheck
+        run: shellcheck dclaude dcodex scripts/*.sh
+      - name: Bash syntax
+        run: bash -n dclaude dcodex scripts/*.sh
+
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: SSH guardrails
+        run: |
+          export TOOL_HOME="$PWD"
+          export HOST_HOME="$RUNNER_TEMP/dclaude-home"
+          mkdir -p "$HOST_HOME/Desktop" "$HOST_HOME/Downloads"
+          source scripts/agent-common.sh
+          [ "$(normalize_home_mount_suffix "~/Desktop" "ci")" = "$HOST_HOME/Desktop" ]
+          if (normalize_home_mount_suffix "~/.ssh" "ci"); then
+            echo "expected ~/.ssh mount to be rejected" >&2
+            exit 1
+          fi
+          if (normalize_home_mount_suffix "/run" "ci"); then
+            echo "expected /run mount to be rejected" >&2
+            exit 1
+          fi
+      - name: Build Docker image
+        run: docker build -t "dclaude:$(cat docs/VERSION)" .
+      - name: Docker build excludes repo-local .ssh
+        run: |
+          trap 'rm -rf .ssh' EXIT
+          mkdir -p .ssh
+          printf 'sentinel\n' > .ssh/marker
+          docker build -f - . <<'EOF'
+          FROM alpine:3.21
+          COPY . /ctx
+          RUN test ! -e /ctx/.ssh && test ! -e /ctx/.ssh/marker
+          EOF
+      - name: Wrapper help
+        run: |
+          ./dclaude --help
+          ./dcodex --help
+      - name: Wrapper version
+        run: |
+          ./dclaude --version
+          ./dcodex --version
+
+  release_from_main:
+    if: "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'github-actions[bot]' && !startsWith(github.event.head_commit.message, 'chore: release v') }}"
+    needs:
+      - lint
+      - smoke
+    runs-on: ubuntu-latest
+    concurrency:
+      group: dclaude-release-main
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Set Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Bump patch version
+        id: bump
+        run: |
+          version="$(python3 scripts/bump_version.py)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Commit and tag release
+        run: |
+          git add docs/VERSION
+          git commit -m "chore: release v${{ steps.bump.outputs.version }}"
+          git tag "v${{ steps.bump.outputs.version }}"
+          git push origin main --follow-tags

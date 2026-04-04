@@ -2,12 +2,38 @@
 
 set -euo pipefail
 
-PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
-  echo "error: dcodex must be run from inside this git repository" >&2
-  exit 1
+resolve_self() {
+  local source_path="${BASH_SOURCE[0]}"
+  local resolved
+
+  if [[ "$source_path" != /* ]]; then
+    if [[ "$source_path" == */* ]]; then
+      source_path="$(cd -P "$(dirname "$source_path")" && pwd)/$(basename "$source_path")"
+    else
+      resolved="$(command -v -- "$source_path")" || {
+        echo "error: failed to resolve launcher path for dcodex" >&2
+        exit 1
+      }
+      source_path="$resolved"
+    fi
+  fi
+
+  while [ -L "$source_path" ]; do
+    resolved="$(readlink "$source_path")"
+    if [[ "$resolved" != /* ]]; then
+      source_path="$(cd -P "$(dirname "$source_path")" && pwd)/$resolved"
+    else
+      source_path="$resolved"
+    fi
+  done
+
+  printf '%s\n' "$(cd -P "$(dirname "$source_path")" && pwd)/$(basename "$source_path")"
 }
 
+SCRIPT_PATH="$(resolve_self)"
+TOOL_HOME="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+
 # shellcheck source=scripts/agent-common.sh
-source "$PROJECT_ROOT/scripts/agent-common.sh"
+source "$TOOL_HOME/scripts/agent-common.sh"
 
 launch_agent "codex" "$@"
