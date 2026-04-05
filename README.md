@@ -143,7 +143,7 @@ Examples:
 
 ## Folder Mount Config
 
-The launcher reads a single config file at `docs/dclaude.yaml` in the `dclaude` repo. If no config is present, the default read-only mounts stay `~/Desktop` and `~/Downloads`.
+The launcher reads a single config file at `scripts/dclaude.yaml` in the `dclaude` repo. If no config is present, the default read-only mounts stay `~/Desktop` and `~/Downloads`.
 
 Config shape:
 
@@ -217,7 +217,7 @@ touch ~/Desktop/test
 touch ~/Downloads/test
 ```
 
-Both commands should fail inside the container with the default config. If you override the folder config, test the paths listed in `docs/dclaude.yaml` instead. Writing in the repo should still succeed.
+Both commands should fail inside the container with the default config. If you override the folder config, test the paths listed in `scripts/dclaude.yaml` instead. Writing in the repo should still succeed.
 
 ## Auth Persistence
 
@@ -265,7 +265,7 @@ Primary docs live under [`docs/`](docs/):
 - [Motivation](docs/motivation.md)
 - [License](docs/LICENSE)
 - [Version](docs/VERSION)
-- [Sample config](docs/dclaude.yaml)
+- [Sample config](scripts/dclaude.yaml)
 
 ## Runtime Model
 

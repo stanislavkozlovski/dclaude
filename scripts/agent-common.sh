@@ -138,7 +138,7 @@ reject_sensitive_mount_overlap() {
 }
 
 find_mount_config() {
-  local config_path="$TOOL_HOME/docs/dclaude.yaml"
+  local config_path="$TOOL_HOME/scripts/dclaude.yaml"
 
   if [ -f "$config_path" ]; then
     printf '%s\n' "$config_path"

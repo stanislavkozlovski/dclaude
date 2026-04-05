@@ -52,7 +52,7 @@ Holds the shared launch logic:
 
 - version loading
 - separation of tool home from target repo
-- launcher-local `docs/dclaude.yaml` loading and mount parsing
+- launcher-local `scripts/dclaude.yaml` loading and mount parsing
 - warm container naming, spec matching, reset, and stop flows
 - image-content-aware warm-container invalidation
 - bind-mounting the live launcher bootstrap script into warm containers
@@ -63,7 +63,7 @@ Holds the shared launch logic:
 - image build bootstrap
 - `/workspace` compatibility alias setup
 
-### `docs/dclaude.yaml`
+### `scripts/dclaude.yaml`
 
 Sample launcher mount config:
 
@@ -72,7 +72,7 @@ Sample launcher mount config:
 - entries are bind-mounted read-only at the same absolute path inside the container
 - entries that overlap `~/.ssh` or `/run/host-services` are rejected so SSH only enters through `--ssh`
 - the checked-in sample preserves the historical `Desktop` and `Downloads` defaults
-- at runtime, the launcher reads `docs/dclaude.yaml` from the launcher repo
+- at runtime, the launcher reads `scripts/dclaude.yaml` from the launcher repo
 
 ### `scripts/bump_version.py`
 
@@ -113,7 +113,7 @@ Always mounted:
 - `~/.cache/pip`
 - `~/.cache/uv`
 
-Default folder config when no `docs/dclaude.yaml` is present:
+Default folder config when no `scripts/dclaude.yaml` is present:
 
 - `~/Desktop` at the same path, read-only
 - `~/Downloads` at the same path, read-only
