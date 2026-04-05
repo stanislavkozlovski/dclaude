@@ -15,7 +15,7 @@ import urllib.request
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 DOCKERFILE_PATH = REPO_ROOT / "Dockerfile"
 README_PATH = REPO_ROOT / "README.md"
-ARCHITECTURE_PATH = REPO_ROOT / "ARCHITECTURE.md"
+ARCHITECTURE_PATH = REPO_ROOT / "docs" / "ARCHITECTURE.md"
 USER_AGENT = "dclaude-tool-version-sync/1.0"
 
 DOCKER_PATTERNS = {
@@ -306,7 +306,7 @@ def main() -> None:
 
     if args.update:
         update_files(latest, tools)
-        print("Updated Dockerfile, README.md, and ARCHITECTURE.md")
+        print("Updated Dockerfile, README.md, and docs/ARCHITECTURE.md")
         return
 
     if any(getattr(current, tool) != getattr(latest, tool) for tool in tools):

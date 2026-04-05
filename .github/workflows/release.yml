@@ -33,7 +33,7 @@ jobs:
           echo "checksum_path=$checksum_path" >> "$GITHUB_OUTPUT"
       - name: Verify tag matches VERSION
         run: |
-          test "${{ steps.meta.outputs.version }}" = "$(tr -d '[:space:]' < VERSION)"
+          test "${{ steps.meta.outputs.version }}" = "$(tr -d '[:space:]' < docs/VERSION)"
       - name: Build release tarball
         id: package
         run: |

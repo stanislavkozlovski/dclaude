@@ -6,7 +6,7 @@ import re
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
-VERSION_PATH = REPO_ROOT / "VERSION"
+VERSION_PATH = REPO_ROOT / "docs" / "VERSION"
 SEMVER_RE = re.compile(r"^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)$")
 
 
