@@ -8,36 +8,13 @@ Includes `cx` for lower token usage.
 
 <br>
 
-<table>
-  <thead>
-    <tr>
-      <th><h3>Action</h3></th>
-      <th><h3>Link</h3></th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td><h3>What is this?</h3></td>
-      <td><h3><a href="#the-what">The What</a></h3></td>
-    </tr>
-    <tr>
-      <td><h3>Install Guide</h3></td>
-      <td><h3><a href="#install">Install</a></h3></td>
-    </tr>
-    <tr>
-      <td><h3>Run &amp; Config Guide</h3></td>
-      <td><h3><a href="#how-to-run">How to Run</a></h3></td>
-    </tr>
-    <tr>
-      <td><h3>Security Overview</h3></td>
-      <td><h3><a href="#security">Security</a></h3></td>
-    </tr>
-    <tr>
-      <td><h3>Miscellaneous</h3></td>
-      <td><h3><a href="#miscellaneous">Miscellaneous</a></h3></td>
-    </tr>
-  </tbody>
-</table>
+| Action | Link |
+| --- | --- |
+| What is this? | [The What](#the-what) |
+| Install Guide | [Install](#install) |
+| Run & Config Guide | [How to Run](#how-to-run) |
+| Security Overview | [Security](#security) |
+| Miscellaneous | [Miscellaneous](#miscellaneous) |
 
 <br>
 
