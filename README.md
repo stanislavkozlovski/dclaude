@@ -8,13 +8,36 @@ Includes `cx` for lower token usage.
 
 <br>
 
-| Action | Link |
-| --- | --- |
-| What is this? | [The What](#the-what) |
-| Install Guide | [Install](#install) |
-| Run & Config Guide | [How to Run](#how-to-run) |
-| Security Overview | [Security](#security) |
-| Miscellaneous | [Miscellaneous](#miscellaneous) |
+<table>
+  <thead>
+    <tr>
+      <th>Action</th>
+      <th>Link</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><big>What is this?</big></td>
+      <td><a href="#the-what"><big>The What</big></a></td>
+    </tr>
+    <tr>
+      <td><big>Install Guide</big></td>
+      <td><a href="#install"><big>Install</big></a></td>
+    </tr>
+    <tr>
+      <td><big>Run &amp; Config Guide</big></td>
+      <td><a href="#how-to-run"><big>How to Run</big></a></td>
+    </tr>
+    <tr>
+      <td><big>Security Overview</big></td>
+      <td><a href="#security"><big>Security</big></a></td>
+    </tr>
+    <tr>
+      <td><big>Miscellaneous</big></td>
+      <td><a href="#miscellaneous"><big>Miscellaneous</big></a></td>
+    </tr>
+  </tbody>
+</table>
 
 <br>
 
@@ -39,14 +62,14 @@ But letting it YOLO is dangerous. You're allowing an autonomous system with full
 I tried this, but the harness still finds something stupid to block on.
 
 <p align="center">
-  <img src="./README/motivation_1.png" alt="Permission mode auto still blocks commands" width="350" />
-  <img src="./README/motivation_2.png" alt="Repetitive approval prompts break flow" width="350" />
+  <img src="./README/motivation_1.png" alt="Permission mode auto still blocks commands" width="700" />
+  <img src="./README/motivation_2.png" alt="Repetitive approval prompts break flow" width="700" />
 </p>
 
 It also isn't fully secure either.
 
 <p align="center">
-  <img src="./README/motivation_3.png" alt="Permission bypass discussion" width="350" />
+  <img src="./README/motivation_3.png" alt="Permission bypass discussion" width="700" />
 </p>
 
 ### 2. run an isolated dev-only VM
