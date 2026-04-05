@@ -4,4 +4,6 @@ brew install stanislavkozlovski/tap/dclaude
 cd /path/to/the-folder-you-wanna-run-claude-on-top-of
 dclaude
 dcodex
+dclaude --ssh
+dcodex --ssh
 ```

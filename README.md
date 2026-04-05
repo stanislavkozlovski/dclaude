@@ -101,6 +101,15 @@ cd /path/to/repo
 dclaude # or dcodex
 ```
 
+If you want GitHub SSH access from inside the container, for example to `git push` from there, launch with `--ssh`:
+
+```bash
+cd /path/to/repo
+dclaude --ssh # or dcodex --ssh
+```
+
+If you commit in-container but push from the host yourself, you do not need `--ssh`.
+
 If you prefer, calling the launcher by its full path also works as long as your current shell is already inside the target repo:
 
 ```bash
@@ -117,7 +126,7 @@ Wrapper options:
 - `--stop` removes the warm container for the current repo and exits
 - `--update-tool` checks the latest upstream version for this wrapper's CLI, rewrites the pin in the launcher repo, and rebuilds the image after confirmation
 - `--yes` skips the confirmation prompt for `--update-tool`
-- `--ssh` forwards `/run/host-services/ssh-auth.sock` and `~/.ssh/known_hosts` when available
+- `--ssh` enables SSH agent forwarding by mounting `/run/host-services/ssh-auth.sock` and `~/.ssh/known_hosts` when available
 - `--version` prints the installed launcher version without requiring Docker or a git repo
 - `--` passes the remaining arguments to the underlying CLI
 
@@ -131,6 +140,7 @@ Examples:
 ./dcodex --stop
 ./dcodex --update-tool
 ./dcodex --update-tool --yes
+./dclaude --ssh
 ./dcodex --ssh
 ```
 
@@ -227,7 +237,11 @@ Interactive login happens through the official CLIs inside the container. If you
 
 API-key auth is intentionally NOT supported for both tools.
 
-## Optional GitHub SSH Access
+## GitHub SSH Access
+
+SSH is disabled by default.
+
+Pass `--ssh` to enable GitHub SSH access inside the container.
 
 `--ssh` is the only supported SSH integration path. It enables forwarded SSH agent access without copying raw private keys into the image.
 
@@ -244,6 +258,8 @@ Recommended host checks before using `--ssh`:
 ssh-add -L
 ssh -T git@github.com
 ```
+
+If those host checks fail, `--ssh` inside the container will fail too.
 
 Recommended container checks after launching with `--ssh`:
 
