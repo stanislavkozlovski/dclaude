@@ -11,30 +11,30 @@ Includes `cx` for lower token usage.
 <table>
   <thead>
     <tr>
-      <th>Action</th>
-      <th>Link</th>
+      <th><h3>Action</h3></th>
+      <th><h3>Link</h3></th>
     </tr>
   </thead>
   <tbody>
     <tr>
-      <td><big>What is this?</big></td>
-      <td><a href="#the-what"><big>The What</big></a></td>
+      <td><h3>What is this?</h3></td>
+      <td><h3><a href="#the-what">The What</a></h3></td>
     </tr>
     <tr>
-      <td><big>Install Guide</big></td>
-      <td><a href="#install"><big>Install</big></a></td>
+      <td><h3>Install Guide</h3></td>
+      <td><h3><a href="#install">Install</a></h3></td>
     </tr>
     <tr>
-      <td><big>Run &amp; Config Guide</big></td>
-      <td><a href="#how-to-run"><big>How to Run</big></a></td>
+      <td><h3>Run &amp; Config Guide</h3></td>
+      <td><h3><a href="#how-to-run">How to Run</a></h3></td>
     </tr>
     <tr>
-      <td><big>Security Overview</big></td>
-      <td><a href="#security"><big>Security</big></a></td>
+      <td><h3>Security Overview</h3></td>
+      <td><h3><a href="#security">Security</a></h3></td>
     </tr>
     <tr>
-      <td><big>Miscellaneous</big></td>
-      <td><a href="#miscellaneous"><big>Miscellaneous</big></a></td>
+      <td><h3>Miscellaneous</h3></td>
+      <td><h3><a href="#miscellaneous">Miscellaneous</a></h3></td>
     </tr>
   </tbody>
 </table>
