@@ -2,7 +2,7 @@
 
 Use this launcher when you want hard infrastructure boundaries instead of a soft, inconsistent permission UX.
 
-Local screenshots used in this note live alongside this file under `README/`.
+Local screenshots used in this note live alongside this file under `docs/`.
 
 ## 1. A denied write should stay denied
 

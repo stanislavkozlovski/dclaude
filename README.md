@@ -39,14 +39,14 @@ But letting it YOLO is dangerous. You're allowing an autonomous system with full
 I tried this, but the harness still finds something stupid to block on.
 
 <p align="center">
-  <img src="./README/motivation_1.png" alt="Permission mode auto still blocks commands" width="700" />
-  <img src="./README/motivation_2.png" alt="Repetitive approval prompts break flow" width="700" />
+  <img src="./docs/motivation_1.png" alt="Permission mode auto still blocks commands" width="700" />
+  <img src="./docs/motivation_2.png" alt="Repetitive approval prompts break flow" width="700" />
 </p>
 
 It also isn't fully secure either.
 
 <p align="center">
-  <img src="./README/motivation_3.png" alt="Permission bypass discussion" width="700" />
+  <img src="./docs/motivation_3.png" alt="Permission bypass discussion" width="700" />
 </p>
 
 ### 2. run an isolated dev-only VM
@@ -143,7 +143,7 @@ Examples:
 
 ## Folder Mount Config
 
-The launcher reads a single config file at `dclaude.yaml` in the `dclaude` repo root. If no config is present, the default read-only mounts stay `~/Desktop` and `~/Downloads`.
+The launcher reads a single config file at `scripts/dclaude.yaml` in the `dclaude` repo. If no config is present, the default read-only mounts stay `~/Desktop` and `~/Downloads`.
 
 Config shape:
 
@@ -217,7 +217,7 @@ touch ~/Desktop/test
 touch ~/Downloads/test
 ```
 
-Both commands should fail inside the container with the default config. If you override the folder config, test the paths listed in `dclaude.yaml` instead. Writing in the repo should still succeed.
+Both commands should fail inside the container with the default config. If you override the folder config, test the paths listed in `scripts/dclaude.yaml` instead. Writing in the repo should still succeed.
 
 ## Auth Persistence
 
@@ -258,11 +258,14 @@ API-key auth is intentionally NOT supported for both tools.
 
 ## Docs
 
-Primary docs live under [`README/`](README/):
+Primary docs live under [`docs/`](docs/):
 
-- [How To Run](README/HOWRUN.md)
-- [Architecture](README/ARCHITECTURE.md)
-- [Motivation](README/motivation.md)
+- [How To Run](docs/HOWRUN.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Motivation](docs/motivation.md)
+- [License](docs/LICENSE)
+- [Version](docs/VERSION)
+- [Sample config](scripts/dclaude.yaml)
 
 ## Runtime Model
 
@@ -307,12 +310,12 @@ Agent `SKILL.md` integration:
 
 ## Rebuilds
 
-By default the wrappers build and reuse `dclaude:<version>`, where `<version>` comes from the repo `VERSION` file. `DCLAUDE_IMAGE_NAME` still overrides that default when you need a custom tag. `--rebuild` also recreates the warm container so the new image is actually used.
+By default the wrappers build and reuse `dclaude:<version>`, where `<version>` comes from `docs/VERSION`. `DCLAUDE_IMAGE_NAME` still overrides that default when you need a custom tag. `--rebuild` also recreates the warm container so the new image is actually used.
 
 Rebuild explicitly when you want updated pinned tool versions or image changes for the current release tag:
 
 ```bash
-docker build -t "dclaude:$(cat VERSION)" .
+docker build -t "dclaude:$(cat docs/VERSION)" .
 ./dclaude --rebuild
 ```
 
@@ -348,7 +351,7 @@ A scheduled GitHub Actions workflow runs the same updater, validates that the im
 
 Release shape:
 
-- `VERSION` is the source of truth for the launcher version
+- `docs/VERSION` is the source of truth for the launcher version
 - CI on pull requests and `main` runs `shellcheck`, `bash -n`, `docker build`, `--help`, and `--version`
 - a scheduled tool-update workflow refreshes pinned upstream tool versions and opens a PR when updates are available
 - a successful non-bot push to `main` bumps the patch version, commits `chore: release vX.Y.Z`, and pushes the matching `vX.Y.Z` tag

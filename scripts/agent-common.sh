@@ -8,7 +8,7 @@ die() {
 }
 
 read_version() {
-  local version_file="${TOOL_HOME:?TOOL_HOME must be set by the launcher}/VERSION"
+  local version_file="${TOOL_HOME:?TOOL_HOME must be set by the launcher}/docs/VERSION"
   local version
 
   [ -f "$version_file" ] || die "missing VERSION file at $version_file"
@@ -138,7 +138,7 @@ reject_sensitive_mount_overlap() {
 }
 
 find_mount_config() {
-  local config_path="$TOOL_HOME/dclaude.yaml"
+  local config_path="$TOOL_HOME/scripts/dclaude.yaml"
 
   if [ -f "$config_path" ]; then
     printf '%s\n' "$config_path"

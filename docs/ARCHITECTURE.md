@@ -7,7 +7,7 @@ This repo provides a Dockerized wrapper around the official Claude Code and Code
 - one shared Docker image
 - two user-facing entrypoints: `dclaude` and `dcodex`
 - one shared shell helper for runtime assembly
-- one `VERSION` file that drives image naming and releases
+- one `docs/VERSION` file that drives image naming and releases
 - three GitHub Actions workflows for CI, scheduled tool refreshes, and tagged releases
 
 The design goal is path fidelity. The target repo and configured read-only directories are mounted into the container at the same absolute paths they have on the host. When no launcher config is present, the default mounts remain `~/Desktop` and `~/Downloads`. `/workspace` exists only as a compatibility alias.
@@ -36,7 +36,7 @@ The image also pre-creates `/workspace` as an alias chain that can be repointed 
 Thin wrappers that:
 
 - resolve tool home from the wrapper script path
-- read the repo `VERSION`
+- read `docs/VERSION`
 - require Docker
 - resolve the target git repo root and current path from the current shell
 - create minimal host state directories
@@ -52,7 +52,7 @@ Holds the shared launch logic:
 
 - version loading
 - separation of tool home from target repo
-- launcher-local `dclaude.yaml` loading and mount parsing
+- launcher-local `scripts/dclaude.yaml` loading and mount parsing
 - warm container naming, spec matching, reset, and stop flows
 - image-content-aware warm-container invalidation
 - bind-mounting the live launcher bootstrap script into warm containers
@@ -63,7 +63,7 @@ Holds the shared launch logic:
 - image build bootstrap
 - `/workspace` compatibility alias setup
 
-### `dclaude.yaml`
+### `scripts/dclaude.yaml`
 
 Sample launcher mount config:
 
@@ -72,13 +72,13 @@ Sample launcher mount config:
 - entries are bind-mounted read-only at the same absolute path inside the container
 - entries that overlap `~/.ssh` or `/run/host-services` are rejected so SSH only enters through `--ssh`
 - the checked-in sample preserves the historical `Desktop` and `Downloads` defaults
-- at runtime, the launcher reads `dclaude.yaml` from the launcher repo root
+- at runtime, the launcher reads `scripts/dclaude.yaml` from the launcher repo
 
 ### `scripts/bump_version.py`
 
 Small release helper used by CI to:
 
-- increment the patch version in `VERSION`
+- increment the patch version in `docs/VERSION`
 
 ### `scripts/sync_tool_versions.py`
 
@@ -88,7 +88,7 @@ Checks the pinned upstream tool versions and can rewrite the repo when newer ver
 - fetches the latest upstream release metadata
 - can target one tool or all tools
 - can emit machine-readable status for wrapper automation
-- refreshes the `Dockerfile` args plus the pinned-version mentions in `README.md` and `ARCHITECTURE.md`
+- refreshes the `Dockerfile` args plus the pinned-version mentions in `README.md` and `docs/ARCHITECTURE.md`
 
 ### `.github/workflows/ci.yml`
 
@@ -100,7 +100,7 @@ Runs on a schedule and on manual dispatch. It refreshes pinned upstream tool ver
 
 ### `.github/workflows/release.yml`
 
-Runs on `v*` tags. It verifies the tag matches `VERSION`, creates the release tarball, publishes the GitHub Release, and updates the Homebrew tap when the cross-repo token is configured.
+Runs on `v*` tags. It verifies the tag matches `docs/VERSION`, creates the release tarball, publishes the GitHub Release, and updates the Homebrew tap when the cross-repo token is configured.
 
 ## Runtime Mount Model
 
@@ -113,7 +113,7 @@ Always mounted:
 - `~/.cache/pip`
 - `~/.cache/uv`
 
-Default folder config when no `dclaude.yaml` is present:
+Default folder config when no `scripts/dclaude.yaml` is present:
 
 - `~/Desktop` at the same path, read-only
 - `~/Downloads` at the same path, read-only
@@ -169,7 +169,7 @@ Image build context:
 
 Default image naming:
 
-- `dclaude:<version>` where `<version>` is read from `VERSION`
+- `dclaude:<version>` where `<version>` is read from `docs/VERSION`
 - `DCLAUDE_IMAGE_NAME` can override that default for local experiments or alternate tags
 
 Container startup bootstrap:

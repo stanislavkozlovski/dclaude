@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Validate VERSION format
-        run: grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' VERSION
+        run: grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' docs/VERSION
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Shellcheck
@@ -45,7 +45,7 @@ jobs:
             exit 1
           fi
       - name: Build Docker image
-        run: docker build -t "dclaude:$(cat VERSION)" .
+        run: docker build -t "dclaude:$(cat docs/VERSION)" .
       - name: Docker build excludes repo-local .ssh
         run: |
           trap 'rm -rf .ssh' EXIT
@@ -92,7 +92,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Commit and tag release
         run: |
-          git add VERSION
+          git add docs/VERSION
           git commit -m "chore: release v${{ steps.bump.outputs.version }}"
           git tag "v${{ steps.bump.outputs.version }}"
           git push origin main --follow-tags
