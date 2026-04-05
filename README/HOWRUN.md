@@ -1,0 +1,7 @@
+```bash
+brew tap stanislavkozlovski/tap
+brew install stanislavkozlovski/tap/dclaude
+cd /path/to/the-folder-you-wanna-run-claude-on-top-of
+dclaude
+dcodex
+```

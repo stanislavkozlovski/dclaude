@@ -21,7 +21,7 @@ read_version() {
 
 DCLAUDE_VERSION="${DCLAUDE_VERSION:-$(read_version)}"
 DCLAUDE_IMAGE_NAME="${DCLAUDE_IMAGE_NAME:-dclaude:${DCLAUDE_VERSION}}"
-DEFAULT_HOME_MOUNTS=("/Desktop" "/Downloads")
+DEFAULT_HOME_MOUNTS=("~/Desktop" "~/Downloads")
 CONFIGURED_HOME_MOUNTS=("${DEFAULT_HOME_MOUNTS[@]}")
 ACTIVE_MOUNT_CONFIG=""
 RESET_WARM_CONTAINER=0
@@ -31,7 +31,7 @@ ASSUME_YES=0
 WARM_CONTAINER_NAME=""
 WARM_CONTAINER_SPEC_HASH=""
 WARM_CONTAINER_STATUS=""
-WARM_CONTAINER_SPEC_VERSION=3
+WARM_CONTAINER_SPEC_VERSION=4
 
 usage() {
   local tool="$1"
@@ -98,6 +98,43 @@ strip_wrapping_quotes() {
   fi
 
   printf '%s\n' "$value"
+}
+
+path_overlaps() {
+  local candidate="$1"
+  local sensitive_root="$2"
+
+  if [ "$candidate" = "$sensitive_root" ]; then
+    return 0
+  fi
+
+  case "$candidate/" in
+    "$sensitive_root"/*)
+      return 0
+      ;;
+  esac
+
+  case "$sensitive_root/" in
+    "$candidate"/*)
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
+reject_sensitive_mount_overlap() {
+  local mount_path="$1"
+  local raw_mount_path="$2"
+  local config_path="$3"
+
+  if path_overlaps "$mount_path" "$HOST_HOME/.ssh"; then
+    die "mount entry $raw_mount_path overlaps \$HOME/.ssh in $config_path; SSH files are only available through --ssh"
+  fi
+
+  if path_overlaps "$mount_path" "/run/host-services"; then
+    die "mount entry $raw_mount_path overlaps /run/host-services in $config_path; SSH agent forwarding is only available through --ssh"
+  fi
 }
 
 find_mount_config() {
@@ -184,6 +221,7 @@ set_warm_container_spec_hash() {
   local skill_template_present=0
   local known_hosts_present=0
   local spec_identity
+  local -a spec_fields
 
   container_launch_hash="$(hash_file "$TOOL_HOME/scripts/container-launch.sh")"
   image_id="$(image_identity)"
@@ -196,22 +234,28 @@ set_warm_container_spec_hash() {
     known_hosts_present=1
   fi
 
-  spec_identity="$(printf '%s\n' \
-    "$WARM_CONTAINER_SPEC_VERSION" \
-    "$DCLAUDE_IMAGE_NAME" \
-    "$image_id" \
-    "$TOOL_HOME" \
-    "$container_launch_hash" \
-    "$TARGET_REPO_ROOT" \
-    "$HOST_HOME" \
-    "$HOST_UID" \
-    "$HOST_GID" \
-    "$tool" \
-    "$ENABLE_SSH" \
-    "$known_hosts_present" \
-    "${CX_BOOTSTRAP_LANGUAGES:-bash python typescript}" \
-    "$skill_template_present" \
-    "${CONFIGURED_HOME_MOUNTS[@]}")"
+  spec_fields=(
+    "$WARM_CONTAINER_SPEC_VERSION"
+    "$DCLAUDE_IMAGE_NAME"
+    "$image_id"
+    "$TOOL_HOME"
+    "$container_launch_hash"
+    "$TARGET_REPO_ROOT"
+    "$HOST_HOME"
+    "$HOST_UID"
+    "$HOST_GID"
+    "$tool"
+    "$ENABLE_SSH"
+    "$known_hosts_present"
+    "${CX_BOOTSTRAP_LANGUAGES:-bash python typescript}"
+    "$skill_template_present"
+  )
+
+  if (( ${#CONFIGURED_HOME_MOUNTS[@]} > 0 )); then
+    spec_fields+=("${CONFIGURED_HOME_MOUNTS[@]}")
+  fi
+
+  spec_identity="$(printf '%s\n' "${spec_fields[@]}")"
 
   WARM_CONTAINER_SPEC_HASH="$(hash_string "$spec_identity")"
 }
@@ -438,10 +482,26 @@ perform_tool_update() {
 normalize_home_mount_suffix() {
   local mount_suffix="$1"
   local config_path="$2"
+  local raw_mount_suffix
   local component
   local -a components
 
   mount_suffix="$(strip_wrapping_quotes "$mount_suffix")"
+  raw_mount_suffix="$mount_suffix"
+
+  case "$mount_suffix" in
+    "~/"*)
+      mount_suffix="$HOST_HOME/${mount_suffix#"~/"}"
+      ;;
+    "~")
+      mount_suffix="$HOST_HOME"
+      ;;
+    /*)
+      ;;
+    *)
+      die "mount entries must be absolute paths or start with ~/ in $config_path: $mount_suffix"
+      ;;
+  esac
 
   while [ "$mount_suffix" != "/" ] && [[ "$mount_suffix" == */ ]]; do
     mount_suffix="${mount_suffix%/}"
@@ -449,19 +509,11 @@ normalize_home_mount_suffix() {
 
   [ -n "$mount_suffix" ] || die "empty mount entry in $config_path"
 
-  case "$mount_suffix" in
-    /*)
-      ;;
-    *)
-      die "mount entries must start with / in $config_path: $mount_suffix"
-      ;;
-  esac
-
   [ "$mount_suffix" != "/" ] || die "mount entry / is not allowed in $config_path"
 
   case "$mount_suffix" in
     *'//'*)
-      die "mount entries must not contain // in $config_path: $mount_suffix"
+      die "mount entries must not contain // in $config_path: $raw_mount_suffix"
       ;;
   esac
 
@@ -469,10 +521,16 @@ normalize_home_mount_suffix() {
   for component in "${components[@]}"; do
     case "$component" in
       .|..)
-        die "mount entries must stay under \$HOME in $config_path: $mount_suffix"
+        die "mount entries must not contain . or .. in $config_path: $raw_mount_suffix"
         ;;
     esac
   done
+
+  if [ "$mount_suffix" = "$HOST_HOME" ]; then
+    die "mount entry $raw_mount_suffix resolves to \$HOME in $config_path; mount a subdirectory instead"
+  fi
+
+  reject_sensitive_mount_overlap "$mount_suffix" "$raw_mount_suffix" "$config_path"
 
   printf '%s\n' "$mount_suffix"
 }
@@ -480,6 +538,10 @@ normalize_home_mount_suffix() {
 home_mount_is_listed() {
   local candidate="$1"
   local existing
+
+  if (( ${#CONFIGURED_HOME_MOUNTS[@]} == 0 )); then
+    return 1
+  fi
 
   for existing in "${CONFIGURED_HOME_MOUNTS[@]}"; do
     if [ "$existing" = "$candidate" ]; then
@@ -495,9 +557,13 @@ load_configured_home_mounts() {
   local line
   local trimmed
   local mount_suffix
+  local default_mount
   local saw_mounts_section=0
 
-  CONFIGURED_HOME_MOUNTS=("${DEFAULT_HOME_MOUNTS[@]}")
+  CONFIGURED_HOME_MOUNTS=()
+  for default_mount in "${DEFAULT_HOME_MOUNTS[@]}"; do
+    CONFIGURED_HOME_MOUNTS+=("$(normalize_home_mount_suffix "$default_mount" "built-in defaults")")
+  done
   ACTIVE_MOUNT_CONFIG=""
 
   config_path="$(find_mount_config || true)"
@@ -538,13 +604,13 @@ load_configured_home_mounts() {
 }
 
 ensure_required_paths() {
-  local mount_suffix
   local mount_path
 
-  for mount_suffix in "${CONFIGURED_HOME_MOUNTS[@]}"; do
-    mount_path="$HOST_HOME$mount_suffix"
-    [ -d "$mount_path" ] || die "expected configured mount $mount_path to exist"
-  done
+  if (( ${#CONFIGURED_HOME_MOUNTS[@]} > 0 )); then
+    for mount_path in "${CONFIGURED_HOME_MOUNTS[@]}"; do
+      [ -d "$mount_path" ] || die "expected configured mount $mount_path to exist"
+    done
+  fi
 }
 
 ensure_host_state() {
@@ -649,7 +715,7 @@ validate_wrapper_args() {
 }
 
 append_common_mounts() {
-  local mount_suffix
+  local mount_path
 
   DOCKER_ARGS+=(
     --mount "type=bind,src=$TARGET_REPO_ROOT,dst=$TARGET_REPO_ROOT"
@@ -659,11 +725,13 @@ append_common_mounts() {
     --mount "type=bind,src=$HOST_HOME/.cache/uv,dst=$HOST_HOME/.cache/uv"
   )
 
-  for mount_suffix in "${CONFIGURED_HOME_MOUNTS[@]}"; do
-    DOCKER_ARGS+=(
-      --mount "type=bind,src=$HOST_HOME$mount_suffix,dst=$HOST_HOME$mount_suffix,readonly"
-    )
-  done
+  if (( ${#CONFIGURED_HOME_MOUNTS[@]} > 0 )); then
+    for mount_path in "${CONFIGURED_HOME_MOUNTS[@]}"; do
+      DOCKER_ARGS+=(
+        --mount "type=bind,src=$mount_path,dst=$mount_path,readonly"
+      )
+    done
+  fi
 }
 
 append_tool_mounts() {
@@ -761,7 +829,7 @@ emit_startup_banner() {
   local bootstrapped_this_launch=0
 
   if [ -n "$ACTIVE_MOUNT_CONFIG" ]; then
-    echo "Using read-only home mounts from $ACTIVE_MOUNT_CONFIG" >&2
+    echo "Using read-only configured mounts from $ACTIVE_MOUNT_CONFIG" >&2
   fi
 
   case "$WARM_CONTAINER_STATUS" in

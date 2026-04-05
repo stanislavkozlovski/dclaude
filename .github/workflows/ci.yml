@@ -29,8 +29,33 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: SSH guardrails
+        run: |
+          export TOOL_HOME="$PWD"
+          export HOST_HOME="$RUNNER_TEMP/dclaude-home"
+          mkdir -p "$HOST_HOME/Desktop" "$HOST_HOME/Downloads"
+          source scripts/agent-common.sh
+          [ "$(normalize_home_mount_suffix "~/Desktop" "ci")" = "$HOST_HOME/Desktop" ]
+          if (normalize_home_mount_suffix "~/.ssh" "ci"); then
+            echo "expected ~/.ssh mount to be rejected" >&2
+            exit 1
+          fi
+          if (normalize_home_mount_suffix "/run" "ci"); then
+            echo "expected /run mount to be rejected" >&2
+            exit 1
+          fi
       - name: Build Docker image
         run: docker build -t "dclaude:$(cat VERSION)" .
+      - name: Docker build excludes repo-local .ssh
+        run: |
+          trap 'rm -rf .ssh' EXIT
+          mkdir -p .ssh
+          printf 'sentinel\n' > .ssh/marker
+          docker build -f - . <<'EOF'
+          FROM alpine:3.21
+          COPY . /ctx
+          RUN test ! -e /ctx/.ssh && test ! -e /ctx/.ssh/marker
+          EOF
       - name: Wrapper help
         run: |
           ./dclaude --help
