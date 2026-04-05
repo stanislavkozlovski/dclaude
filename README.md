@@ -28,7 +28,7 @@ Includes `cx` for lower token usage.
 </div>
 
 
-## The Problem This Solves
+## The Problem
 
 <p align="center">
   <i>“Ever have a 1-minute task take you 10+ minutes because it's stuck waiting on you approving multiple chained commands?”</i>
@@ -44,11 +44,16 @@ But letting it YOLO is dangerous. You're allowing an autonomous system with full
 
 I tried this, but the harness still finds something stupid to block on.
 
-![](./README/motivation_1.png)
-![](./README/motivation_2.png)
+<p align="center">
+  <img src="./README/motivation_1.png" alt="Permission mode auto still blocks commands" width="350" />
+  <img src="./README/motivation_2.png" alt="Repetitive approval prompts break flow" width="350" />
+</p>
 
 It also isn't fully secure either.
-![](./README/motivation_3.png)
+
+<p align="center">
+  <img src="./README/motivation_3.png" alt="Permission bypass discussion" width="350" />
+</p>
 
 ### 2. run an isolated dev-only VM
 
