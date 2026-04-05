@@ -5,7 +5,7 @@ set -euo pipefail
 TARGET_REPO_ROOT="${TARGET_REPO_ROOT:?TARGET_REPO_ROOT must be set}"
 CX_BOOTSTRAP_LANGUAGES="${CX_BOOTSTRAP_LANGUAGES:-bash python typescript}"
 CX_GRAMMAR_DIR="${HOME}/.cache/cx/grammars"
-CX_SKILL_TEMPLATE_DIR="/opt/dclaude/skills/cx-navigation"
+CX_SKILL_TEMPLATE_DIR="/opt/dclaude/docs/skills/cx-navigation"
 BOOTSTRAP_ONLY=0
 TOOL_NAME=""
 

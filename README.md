@@ -237,7 +237,7 @@ Every bind mount is listed below. If the access column says `read/write`, edits 
 | `~/.claude.json` | `~/.claude.json` | Claude only | read/write | yes | Claude auth file |
 | `~/.config/claude-code` | `~/.config/claude-code` | Claude only | read/write | yes | Claude CLI config |
 | `~/.codex` | `~/.codex` | Codex only | read/write | yes | Codex auth, state, and skills |
-| `skills/cx-navigation` in this repo | `/opt/dclaude/skills/cx-navigation` | Codex only when present | read-only | no | bundled skill template copied into `~/.codex/skills/dclaude-cx-navigation` if missing |
+| `docs/skills/cx-navigation` in this repo | `/opt/dclaude/docs/skills/cx-navigation` | Codex only when present | read-only | no | bundled skill template copied into `~/.codex/skills/dclaude-cx-navigation` if missing |
 | `/run/host-services/ssh-auth.sock` | same absolute path | only with `--ssh` | SSH agent socket passthrough | host agent is used directly | lets container processes authenticate through the host agent without copying keys |
 | `~/.ssh/known_hosts` | `~/.ssh/known_hosts` | only with `--ssh` when present | read-only | no | host key verification |
 

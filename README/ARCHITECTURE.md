@@ -127,7 +127,7 @@ Claude-only state:
 Codex-only state:
 
 - `~/.codex`
-- repo-shipped `cx` skill template mounted into `/opt/dclaude/skills/cx-navigation`
+- repo-shipped `cx` skill template mounted into `/opt/dclaude/docs/skills/cx-navigation`
 
 Optional SSH mode:
 

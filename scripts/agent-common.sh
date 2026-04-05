@@ -226,7 +226,7 @@ set_warm_container_spec_hash() {
   container_launch_hash="$(hash_file "$TOOL_HOME/scripts/container-launch.sh")"
   image_id="$(image_identity)"
 
-  if [ -d "$TOOL_HOME/skills/cx-navigation" ]; then
+  if [ -d "$TOOL_HOME/docs/skills/cx-navigation" ]; then
     skill_template_present=1
   fi
 
@@ -747,9 +747,9 @@ append_tool_mounts() {
       DOCKER_ARGS+=(
         --mount "type=bind,src=$HOST_HOME/.codex,dst=$HOST_HOME/.codex"
       )
-      if [ -d "$TOOL_HOME/skills/cx-navigation" ]; then
+      if [ -d "$TOOL_HOME/docs/skills/cx-navigation" ]; then
         DOCKER_ARGS+=(
-          --mount "type=bind,src=$TOOL_HOME/skills/cx-navigation,dst=/opt/dclaude/skills/cx-navigation,readonly"
+          --mount "type=bind,src=$TOOL_HOME/docs/skills/cx-navigation,dst=/opt/dclaude/skills/cx-navigation,readonly"
         )
       fi
       ;;
