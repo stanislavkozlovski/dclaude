@@ -208,7 +208,7 @@ sanitize_name_component() {
 
 validate_profile_name() {
   local name="$1"
-  [[ "$name" =~ ^[a-zA-Z0-9]([a-zA-Z0-9_-]*[a-zA-Z0-9])?$ ]] || die "invalid profile name: $name (alphanumeric, hyphens, underscores only)"
+  [[ "$name" =~ ^[a-zA-Z0-9]([a-zA-Z0-9_-]*[a-zA-Z0-9])?$ ]] || die "invalid profile name: $name (must start and end with alphanumeric; only alphanumeric, hyphens, underscores allowed)"
 }
 
 codex_home_dir() {
@@ -222,12 +222,12 @@ codex_home_dir() {
 list_profiles() {
   local dir dir_name profile_name
 
-  printf '  (default)\t%s/.codex\n' "$HOST_HOME" >&2
+  printf '  (default)\t%s/.codex\n' "$HOST_HOME"
   for dir in "$HOST_HOME"/.codex-*/; do
     [ -d "$dir" ] || continue
     dir_name="$(basename "$dir")"
     profile_name="${dir_name#.codex-}"
-    printf '  %s\t%s\n' "$profile_name" "$dir" >&2
+    printf '  %s\t%s\n' "$profile_name" "$dir"
   done
 }
 
@@ -666,12 +666,15 @@ ensure_host_state() {
       codex_home="$(codex_home_dir)"
       mkdir -p "$codex_home" "$codex_home/skills"
       if [ -n "$AGENT_PROFILE" ]; then
+        # Seed new profiles from the default profile's config (~/.codex).
+        # Only specific files are copied, and only when they don't already exist
+        # in the profile dir, to avoid clobbering profile-specific customizations.
         local default_codex="$HOST_HOME/.codex"
         if [ -f "$default_codex/AGENTS.md" ] && [ ! -f "$codex_home/AGENTS.md" ]; then
           cp "$default_codex/AGENTS.md" "$codex_home/AGENTS.md"
         fi
-        if [ -d "$default_codex/skills" ] && [ ! -d "$codex_home/skills/dclaude-cx-navigation" ]; then
-          cp -R "$default_codex/skills/." "$codex_home/skills/"
+        if [ -d "$default_codex/skills/dclaude-cx-navigation" ] && [ ! -d "$codex_home/skills/dclaude-cx-navigation" ]; then
+          cp -R "$default_codex/skills/dclaude-cx-navigation" "$codex_home/skills/dclaude-cx-navigation"
         fi
       fi
       ;;
@@ -771,6 +774,10 @@ validate_wrapper_args() {
 
   if [ "$LIST_PROFILES" -eq 1 ] && { [ "$UPDATE_TOOL" -eq 1 ] || [ "$STOP_WARM_CONTAINER" -eq 1 ] || [ "$REBUILD_IMAGE" -eq 1 ]; }; then
     die "--list-profiles cannot be combined with --update-tool, --stop, or --rebuild"
+  fi
+
+  if [ "$LIST_PROFILES" -eq 1 ] && [ -n "$AGENT_PROFILE" ]; then
+    die "--list-profiles cannot be combined with --profile"
   fi
 }
 

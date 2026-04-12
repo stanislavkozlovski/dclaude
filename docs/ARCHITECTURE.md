@@ -179,7 +179,8 @@ Container startup bootstrap:
 - reports whether `cx` is available
 - installs `bash`, `python`, and `typescript` grammars on first use
 - seeds `~/.claude/CX.md` and wires `~/.claude/CLAUDE.md` when Claude guidance is missing
-- seeds `~/.codex/AGENTS.md` and `~/.codex/skills/dclaude-cx-navigation` when Codex guidance is missing (or into `~/.codex-NAME` for profiles, copying from `~/.codex` on first use)
+- seeds `~/.codex/AGENTS.md` and `~/.codex/skills/dclaude-cx-navigation` when Codex guidance is missing
+- for named profiles (`~/.codex-NAME`): seeds `AGENTS.md` and `skills/dclaude-cx-navigation` from the default profile (`~/.codex`) on first use; only these specific files are copied, and only when absent in the profile dir
 
 Release automation:
 
