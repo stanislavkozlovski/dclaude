@@ -124,6 +124,8 @@ Wrapper options:
 - `--update-tool` checks the latest upstream version for this wrapper's CLI, rewrites the pin in the launcher repo, and rebuilds the image after confirmation
 - `--yes` skips the confirmation prompt for `--update-tool`
 - `--ssh` enables SSH agent forwarding by mounting `/run/host-services/ssh-auth.sock` and `~/.ssh/known_hosts` when available
+- `--profile NAME` (Codex only) uses a named profile with a separate `~/.codex-NAME` config directory, giving you isolated auth, state, and skills per profile
+- `--list-profiles` (Codex only) lists available Codex profiles
 - `--version` prints the installed launcher version without requiring Docker or a git repo
 - `--` passes the remaining arguments to the underlying CLI
 
@@ -139,6 +141,9 @@ Examples:
 ./dcodex --update-tool --yes
 ./dclaude --ssh
 ./dcodex --ssh
+./dcodex --profile magi
+./dcodex --profile magi --ssh
+./dcodex --list-profiles
 ```
 
 ## Folder Mount Config
@@ -236,7 +241,7 @@ Every bind mount is listed below. If the access column says `read/write`, edits 
 | `~/.claude` | `~/.claude` | Claude only | read/write | yes | Claude auth and state |
 | `~/.claude.json` | `~/.claude.json` | Claude only | read/write | yes | Claude auth file |
 | `~/.config/claude-code` | `~/.config/claude-code` | Claude only | read/write | yes | Claude CLI config |
-| `~/.codex` | `~/.codex` | Codex only | read/write | yes | Codex auth, state, and skills |
+| `~/.codex` (or `~/.codex-NAME` with `--profile`) | same path | Codex only | read/write | yes | Codex auth, state, and skills |
 | `skills/cx-navigation` in this repo | `/opt/dclaude/skills/cx-navigation` | Codex only when present | read-only | no | bundled skill template copied into `~/.codex/skills/dclaude-cx-navigation` if missing |
 | `/run/host-services/ssh-auth.sock` | same absolute path | only with `--ssh` | SSH agent socket passthrough | host agent is used directly | lets container processes authenticate through the host agent without copying keys |
 | `~/.ssh/known_hosts` | `~/.ssh/known_hosts` | only with `--ssh` when present | read-only | no | host key verification |
@@ -249,6 +254,8 @@ The launcher may also seed missing guidance into the mounted home directories:
 - `~/.claude/CLAUDE.md`
 - `~/.codex/AGENTS.md`
 - `~/.codex/skills/dclaude-cx-navigation`
+
+When using `--profile NAME`, the profile directory `~/.codex-NAME` is used instead of `~/.codex`. On first use, `AGENTS.md` and skills are copied from the default `~/.codex` if they exist there.
 
 Interactive login happens through the official CLIs inside the container. If you are not logged in yet, run the wrapper and complete the normal login flow there. The mounted state keeps you logged in across container restarts.
 
@@ -305,8 +312,8 @@ Agent `SKILL.md` integration:
 - if `~/.claude/CX.md` is missing, the launcher writes it from `cx skill`
 - if `~/.claude/CLAUDE.md` is missing, the launcher creates it with `@CX.md`
 - if `~/.claude/CLAUDE.md` exists but does not reference `@CX.md` or already contain `cx` guidance, the launcher appends `@CX.md`
-- if `~/.codex/AGENTS.md` is missing `cx` guidance, the launcher writes or appends it from `cx skill`
-- if `~/.codex/skills/dclaude-cx-navigation` is missing, the launcher seeds it from the repo template
+- if `~/.codex/AGENTS.md` is missing `cx` guidance, the launcher writes or appends it from `cx skill` (same for `~/.codex-NAME` with profiles)
+- if `~/.codex/skills/dclaude-cx-navigation` is missing, the launcher seeds it from the repo template (same for profiles)
 
 ## Rebuilds
 
