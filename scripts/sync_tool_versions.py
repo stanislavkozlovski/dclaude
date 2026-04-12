@@ -31,6 +31,8 @@ TOOL_ALIASES = {
     "codex": "codex",
 }
 
+SEMVER_PATTERN = r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?"
+
 
 @dataclasses.dataclass(frozen=True)
 class ToolVersions:
@@ -155,8 +157,16 @@ def update_files(latest: ToolVersions, tools: tuple[str, ...]) -> None:
                 ("CX_SHA256", r"^ARG CX_SHA256=\S+$", f"ARG CX_SHA256={latest.cx_sha256}"),
             ]
         )
-        readme_replacements.append(("README cx version", r"`cx [^`]+`", f"`cx {latest.cx}`"))
-        architecture_replacements.append(("ARCHITECTURE cx version", r"`cx [^`]+`", f"`cx {latest.cx}`"))
+        readme_replacements.append(
+            ("README cx version", rf"`cx {SEMVER_PATTERN}`", f"`cx {latest.cx}`")
+        )
+        architecture_replacements.append(
+            (
+                "ARCHITECTURE cx version",
+                rf"`cx {SEMVER_PATTERN}`",
+                f"`cx {latest.cx}`",
+            )
+        )
 
     if "claude_code" in tools:
         docker_replacements.append(
