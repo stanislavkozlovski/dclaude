@@ -309,7 +309,7 @@ Persistent `cx` cache:
 
 Agent `SKILL.md` integration:
 
-- if `~/.claude/CX.md` is missing, the launcher writes it from `cx skill`
+- if `~/.claude/CX.md` is missing, the launcher writes it from `cx 0.6.4`
 - if `~/.claude/CLAUDE.md` is missing, the launcher creates it with `@CX.md`
 - if `~/.claude/CLAUDE.md` exists but does not reference `@CX.md` or already contain `cx` guidance, the launcher appends `@CX.md`
 - if `~/.codex/AGENTS.md` is missing `cx` guidance, the launcher writes or appends it from `cx skill` (same for `~/.codex-NAME` with profiles)
@@ -328,7 +328,7 @@ docker build -t "dclaude:$(cat docs/VERSION)" .
 
 The image currently pins the installed CLI versions:
 
-- `@anthropic-ai/claude-code@2.1.89`
+- `@anthropic-ai/claude-code@2.1.92`
 - `@openai/codex@0.118.0`
 - `cx 0.6.0`
 
