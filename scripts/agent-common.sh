@@ -28,6 +28,8 @@ RESET_WARM_CONTAINER=0
 STOP_WARM_CONTAINER=0
 UPDATE_TOOL=0
 ASSUME_YES=0
+AGENT_PROFILE=""
+LIST_PROFILES=0
 WARM_CONTAINER_NAME=""
 WARM_CONTAINER_SPEC_HASH=""
 WARM_CONTAINER_STATUS=""
@@ -45,6 +47,8 @@ Options:
   --update-tool  update the pinned upstream CLI version for this wrapper and rebuild the image
   --yes      skip the confirmation prompt for --update-tool
   --ssh      forward the host SSH agent socket and known_hosts when available
+  --profile NAME  use a named Codex profile (separate ~/.codex-NAME directory)
+  --list-profiles  list available Codex profiles
   --help     show this wrapper help
   --version  show the wrapper version
 
@@ -56,6 +60,8 @@ Examples:
   $tool --update-tool
   $tool --update-tool --yes
   $tool --ssh
+  $tool --profile magi
+  $tool --list-profiles
 EOF
 }
 
@@ -200,6 +206,31 @@ sanitize_name_component() {
   printf '%s\n' "$value"
 }
 
+validate_profile_name() {
+  local name="$1"
+  [[ "$name" =~ ^[a-zA-Z0-9]([a-zA-Z0-9_-]*[a-zA-Z0-9])?$ ]] || die "invalid profile name: $name (must start and end with alphanumeric; only alphanumeric, hyphens, underscores allowed)"
+}
+
+codex_home_dir() {
+  if [ -n "$AGENT_PROFILE" ]; then
+    printf '%s\n' "$HOST_HOME/.codex-$AGENT_PROFILE"
+  else
+    printf '%s\n' "$HOST_HOME/.codex"
+  fi
+}
+
+list_profiles() {
+  local dir dir_name profile_name
+
+  printf '  (default)\t%s/.codex\n' "$HOST_HOME"
+  for dir in "$HOST_HOME"/.codex-*/; do
+    [ -d "$dir" ] || continue
+    dir_name="$(basename "$dir")"
+    profile_name="${dir_name#.codex-}"
+    printf '  %s\t%s\n' "$profile_name" "$dir"
+  done
+}
+
 set_warm_container_name() {
   local tool="$1"
   local repo_name
@@ -207,11 +238,15 @@ set_warm_container_name() {
   local stable_identity
 
   repo_name="$(sanitize_name_component "$(basename "$TARGET_REPO_ROOT")")"
-  stable_identity="$(printf '%s\n' "$tool" "$TARGET_REPO_ROOT" "$HOST_HOME" "$HOST_UID" "$HOST_GID")"
+  stable_identity="$(printf '%s\n' "$tool" "$TARGET_REPO_ROOT" "$HOST_HOME" "$HOST_UID" "$HOST_GID" "$AGENT_PROFILE")"
   stable_hash="$(hash_string "$stable_identity")"
   stable_hash="${stable_hash:0:12}"
 
-  WARM_CONTAINER_NAME="dclaude-${tool}-${repo_name}-${stable_hash}"
+  if [ -n "$AGENT_PROFILE" ]; then
+    WARM_CONTAINER_NAME="dclaude-${tool}-${AGENT_PROFILE}-${repo_name}-${stable_hash}"
+  else
+    WARM_CONTAINER_NAME="dclaude-${tool}-${repo_name}-${stable_hash}"
+  fi
 }
 
 set_warm_container_spec_hash() {
@@ -245,6 +280,7 @@ set_warm_container_spec_hash() {
     "$HOST_UID"
     "$HOST_GID"
     "$tool"
+    "$AGENT_PROFILE"
     "$ENABLE_SSH"
     "$known_hosts_present"
     "${CX_BOOTSTRAP_LANGUAGES:-bash python typescript}"
@@ -626,7 +662,21 @@ ensure_host_state() {
       touch "$HOST_HOME/.claude.json"
       ;;
     codex)
-      mkdir -p "$HOST_HOME/.codex" "$HOST_HOME/.codex/skills"
+      local codex_home
+      codex_home="$(codex_home_dir)"
+      mkdir -p "$codex_home" "$codex_home/skills"
+      if [ -n "$AGENT_PROFILE" ]; then
+        # Seed new profiles from the default profile's config (~/.codex).
+        # Only specific files are copied, and only when they don't already exist
+        # in the profile dir, to avoid clobbering profile-specific customizations.
+        local default_codex="$HOST_HOME/.codex"
+        if [ -f "$default_codex/AGENTS.md" ] && [ ! -f "$codex_home/AGENTS.md" ]; then
+          cp "$default_codex/AGENTS.md" "$codex_home/AGENTS.md"
+        fi
+        if [ -d "$default_codex/skills/dclaude-cx-navigation" ] && [ ! -d "$codex_home/skills/dclaude-cx-navigation" ]; then
+          cp -R "$default_codex/skills/dclaude-cx-navigation" "$codex_home/skills/dclaude-cx-navigation"
+        fi
+      fi
       ;;
     *)
       die "unsupported tool: $1"
@@ -683,6 +733,15 @@ parse_wrapper_args() {
       --yes)
         ASSUME_YES=1
         ;;
+      --profile)
+        shift
+        AGENT_PROFILE="${1:-}"
+        [ -n "$AGENT_PROFILE" ] || die "--profile requires a name"
+        validate_profile_name "$AGENT_PROFILE"
+        ;;
+      --list-profiles)
+        LIST_PROFILES=1
+        ;;
       --help|-h)
         usage "$WRAPPER_NAME"
         exit 0
@@ -711,6 +770,14 @@ validate_wrapper_args() {
 
   if [ "$UPDATE_TOOL" -eq 1 ] && [ "$STOP_WARM_CONTAINER" -eq 1 ]; then
     die "--update-tool cannot be combined with --stop"
+  fi
+
+  if [ "$LIST_PROFILES" -eq 1 ] && { [ "$UPDATE_TOOL" -eq 1 ] || [ "$STOP_WARM_CONTAINER" -eq 1 ] || [ "$REBUILD_IMAGE" -eq 1 ]; }; then
+    die "--list-profiles cannot be combined with --update-tool, --stop, or --rebuild"
+  fi
+
+  if [ "$LIST_PROFILES" -eq 1 ] && [ -n "$AGENT_PROFILE" ]; then
+    die "--list-profiles cannot be combined with --profile"
   fi
 }
 
@@ -744,8 +811,10 @@ append_tool_mounts() {
       )
       ;;
     codex)
+      local codex_home
+      codex_home="$(codex_home_dir)"
       DOCKER_ARGS+=(
-        --mount "type=bind,src=$HOST_HOME/.codex,dst=$HOST_HOME/.codex"
+        --mount "type=bind,src=$codex_home,dst=$codex_home"
       )
       if [ -d "$TOOL_HOME/skills/cx-navigation" ]; then
         DOCKER_ARGS+=(
@@ -798,7 +867,9 @@ append_tool_env() {
       DOCKER_ARGS+=(-e "DISABLE_AUTOUPDATER=1")
       ;;
     codex)
-      DOCKER_ARGS+=(-e "CODEX_HOME=$HOST_HOME/.codex")
+      local codex_home
+      codex_home="$(codex_home_dir)"
+      DOCKER_ARGS+=(-e "CODEX_HOME=$codex_home")
       ;;
     *)
       die "unsupported tool: $1"
@@ -860,9 +931,15 @@ emit_startup_banner() {
       fi
       ;;
     codex)
-      echo "Starting interactive Codex for $TARGET_CWD" >&2
+      local codex_home
+      codex_home="$(codex_home_dir)"
+      if [ -n "$AGENT_PROFILE" ]; then
+        echo "Starting interactive Codex (profile: $AGENT_PROFILE) for $TARGET_CWD" >&2
+      else
+        echo "Starting interactive Codex for $TARGET_CWD" >&2
+      fi
       if [ "$bootstrapped_this_launch" -eq 1 ]; then
-        echo "Warm container bootstrap seeded $HOST_HOME/.codex/AGENTS.md and $HOST_HOME/.codex/skills/dclaude-cx-navigation if needed" >&2
+        echo "Warm container bootstrap seeded $codex_home/AGENTS.md and $codex_home/skills/dclaude-cx-navigation if needed" >&2
       fi
       ;;
     *)
@@ -886,8 +963,22 @@ launch_agent() {
   HOST_UID="$(id -u)"
   HOST_GID="$(id -g)"
 
+  if [ "$tool" != "codex" ]; then
+    if [ -n "$AGENT_PROFILE" ]; then
+      die "--profile is only supported for codex"
+    fi
+    if [ "$LIST_PROFILES" -eq 1 ]; then
+      die "--list-profiles is only supported for codex"
+    fi
+  fi
+
   if [ "$UPDATE_TOOL" -eq 1 ]; then
     perform_tool_update "$tool"
+    exit 0
+  fi
+
+  if [ "$LIST_PROFILES" -eq 1 ]; then
+    list_profiles
     exit 0
   fi
 

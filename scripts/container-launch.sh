@@ -148,7 +148,7 @@ ensure_claude_cx_guidance() {
 }
 
 ensure_codex_cx_guidance() {
-  local codex_home="$HOME/.codex"
+  local codex_home="${CODEX_HOME:-$HOME/.codex}"
   local agents_file="$codex_home/AGENTS.md"
   local skill_dir="$codex_home/skills/dclaude-cx-navigation"
 

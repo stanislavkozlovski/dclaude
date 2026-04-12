@@ -60,6 +60,7 @@ Holds the shared launch logic:
 - common Docker flags
 - mount assembly
 - optional SSH agent forwarding
+- Codex multi-profile support (`--profile NAME`, `--list-profiles`)
 - image build bootstrap
 - `/workspace` compatibility alias setup
 
@@ -126,7 +127,7 @@ Claude-only state:
 
 Codex-only state:
 
-- `~/.codex`
+- `~/.codex` (or `~/.codex-NAME` when launched with `--profile NAME`)
 - repo-shipped `cx` skill template mounted into `/opt/dclaude/skills/cx-navigation`
 
 Optional SSH mode:
@@ -136,7 +137,7 @@ Optional SSH mode:
 
 ## Process Model
 
-The wrappers ensure one warm container per tool and target repo. They create it with `docker run -d` when missing or stale, then launch sessions with `docker exec`.
+The wrappers ensure one warm container per tool, target repo, and profile (when `--profile` is used). They create it with `docker run -d` when missing or stale, then launch sessions with `docker exec`.
 
 Warm container creation uses:
 
@@ -179,6 +180,7 @@ Container startup bootstrap:
 - installs `bash`, `python`, and `typescript` grammars on first use
 - seeds `~/.claude/CX.md` and wires `~/.claude/CLAUDE.md` when Claude guidance is missing
 - seeds `~/.codex/AGENTS.md` and `~/.codex/skills/dclaude-cx-navigation` when Codex guidance is missing
+- for named profiles (`~/.codex-NAME`): seeds `AGENTS.md` and `skills/dclaude-cx-navigation` from the default profile (`~/.codex`) on first use; only these specific files are copied, and only when absent in the profile dir
 
 Release automation:
 
@@ -198,20 +200,20 @@ None.
 There are no tables, collections, migrations, or ORM models in this project. The only stateful paths are filesystem mounts:
 
 - Claude auth/config: `~/.claude`, `~/.claude.json`, `~/.config/claude-code`
-- Codex state: `~/.codex`
+- Codex state: `~/.codex` (or `~/.codex-NAME` per profile)
 - shared caches: `~/.cache/dclaude/cx` on host mapped to `~/.cache/cx` in-container, plus `~/.cache/pip`, `~/.cache/uv`
 
 Additional non-database runtime state:
 
-- warm Docker containers named per tool and target repo
+- warm Docker containers named per tool, target repo, and profile
 - warm-container labels that track the expected runtime spec for invalidation and reuse
 
 The launcher may create missing guidance files inside those mounted directories:
 
 - `~/.claude/CX.md`
 - `~/.claude/CLAUDE.md`
-- `~/.codex/AGENTS.md`
-- `~/.codex/skills/dclaude-cx-navigation`
+- `~/.codex/AGENTS.md` (or `~/.codex-NAME/AGENTS.md` per profile)
+- `~/.codex/skills/dclaude-cx-navigation` (or `~/.codex-NAME/skills/dclaude-cx-navigation` per profile)
 
 ## Security Notes
 

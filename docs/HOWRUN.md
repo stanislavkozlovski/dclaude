@@ -6,4 +6,6 @@ dclaude
 dcodex
 dclaude --ssh
 dcodex --ssh
+dcodex --profile magi        # use a named Codex profile (~/.codex-magi)
+dcodex --list-profiles        # list available Codex profiles
 ```
