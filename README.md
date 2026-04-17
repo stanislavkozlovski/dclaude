@@ -6,6 +6,8 @@ Run Claude Code or Codex with full autonomous permissions inside a Docker contai
 
 Includes `cx` for lower token usage.
 
+<img src="./docs/logo.jpg" alt="dclaude logo" width="300" />
+
 <br>
 
 | Action | Link |
@@ -242,7 +244,6 @@ Every bind mount is listed below. If the access column says `read/write`, edits 
 | `~/.claude.json` | `~/.claude.json` | Claude only | read/write | yes | Claude auth file |
 | `~/.config/claude-code` | `~/.config/claude-code` | Claude only | read/write | yes | Claude CLI config |
 | `~/.codex` (or `~/.codex-NAME` with `--profile`) | same path | Codex only | read/write | yes | Codex auth, state, and skills |
-| `skills/cx-navigation` in this repo | `/opt/dclaude/skills/cx-navigation` | Codex only when present | read-only | no | bundled skill template copied into `~/.codex/skills/dclaude-cx-navigation` if missing |
 | `/run/host-services/ssh-auth.sock` | same absolute path | only with `--ssh` | SSH agent socket passthrough | host agent is used directly | lets container processes authenticate through the host agent without copying keys |
 | `~/.ssh/known_hosts` | `~/.ssh/known_hosts` | only with `--ssh` when present | read-only | no | host key verification |
 
@@ -313,7 +314,7 @@ Agent `SKILL.md` integration:
 - if `~/.claude/CLAUDE.md` is missing, the launcher creates it with `@CX.md`
 - if `~/.claude/CLAUDE.md` exists but does not reference `@CX.md` or already contain `cx` guidance, the launcher appends `@CX.md`
 - if `~/.codex/AGENTS.md` is missing `cx` guidance, the launcher writes or appends it from `cx skill` (same for `~/.codex-NAME` with profiles)
-- if `~/.codex/skills/dclaude-cx-navigation` is missing, the launcher seeds it from the repo template (same for profiles)
+- if `~/.codex/skills/dclaude-cx-navigation` is missing, the launcher seeds it from `cx skill` (same for profiles)
 
 ## Rebuilds
 

@@ -128,7 +128,7 @@ Claude-only state:
 Codex-only state:
 
 - `~/.codex` (or `~/.codex-NAME` when launched with `--profile NAME`)
-- repo-shipped `cx` skill template mounted into `/opt/dclaude/skills/cx-navigation`
+- `cx skill` seeds `~/.codex/skills/dclaude-cx-navigation` at runtime if missing
 
 Optional SSH mode:
 

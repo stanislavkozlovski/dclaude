@@ -253,17 +253,12 @@ set_warm_container_spec_hash() {
   local tool="$1"
   local container_launch_hash
   local image_id
-  local skill_template_present=0
   local known_hosts_present=0
   local spec_identity
   local -a spec_fields
 
   container_launch_hash="$(hash_file "$TOOL_HOME/scripts/container-launch.sh")"
   image_id="$(image_identity)"
-
-  if [ -d "$TOOL_HOME/skills/cx-navigation" ]; then
-    skill_template_present=1
-  fi
 
   if [ -f "$HOST_HOME/.ssh/known_hosts" ]; then
     known_hosts_present=1
@@ -284,7 +279,6 @@ set_warm_container_spec_hash() {
     "$ENABLE_SSH"
     "$known_hosts_present"
     "${CX_BOOTSTRAP_LANGUAGES:-bash python typescript}"
-    "$skill_template_present"
   )
 
   if (( ${#CONFIGURED_HOME_MOUNTS[@]} > 0 )); then
@@ -816,11 +810,6 @@ append_tool_mounts() {
       DOCKER_ARGS+=(
         --mount "type=bind,src=$codex_home,dst=$codex_home"
       )
-      if [ -d "$TOOL_HOME/skills/cx-navigation" ]; then
-        DOCKER_ARGS+=(
-          --mount "type=bind,src=$TOOL_HOME/skills/cx-navigation,dst=/opt/dclaude/skills/cx-navigation,readonly"
-        )
-      fi
       ;;
     *)
       die "unsupported tool: $1"
