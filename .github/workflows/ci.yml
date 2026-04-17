@@ -100,8 +100,8 @@ jobs:
         run: |
           git add docs/VERSION
           git commit -m "chore: release v${{ steps.bump.outputs.version }}"
-          git tag "${{ steps.meta.outputs.tag }}"
-          git push origin main --follow-tags
+          git tag -a "${{ steps.meta.outputs.tag }}" -m "Release ${{ steps.meta.outputs.tag }}"
+          git push origin main "refs/tags/${{ steps.meta.outputs.tag }}"
 
   publish_release:
     if: ${{ needs.release_from_main.result == 'success' }}
