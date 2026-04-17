@@ -10,7 +10,7 @@ This repo provides a Dockerized wrapper around the official Claude Code and Code
 - one `docs/VERSION` file that drives image naming and releases
 - three GitHub Actions workflows for CI, scheduled tool refreshes, and tagged releases
 
-The design goal is path fidelity. The target repo and configured read-only directories are mounted into the container at the same absolute paths they have on the host. When no launcher config is present, the default mounts remain `~/Desktop` and `~/Downloads`. `/workspace` exists only as a compatibility alias.
+The design goal is path fidelity. The target repo and configured read-only directories are mounted into the container at the same absolute paths they have on the host. When no launcher config is present, no extra host directories are mounted. `/workspace` exists only as a compatibility alias.
 
 The runtime model uses two separate path roles:
 
@@ -52,7 +52,7 @@ Holds the shared launch logic:
 
 - version loading
 - separation of tool home from target repo
-- launcher-local `scripts/dclaude.yaml` loading and mount parsing
+- optional `scripts/dclaude.yaml` loading and mount parsing
 - warm container naming, spec matching, reset, and stop flows
 - image-content-aware warm-container invalidation
 - bind-mounting the live launcher bootstrap script into warm containers
@@ -64,16 +64,16 @@ Holds the shared launch logic:
 - image build bootstrap
 - `/workspace` compatibility alias setup
 
-### `scripts/dclaude.yaml`
+### `scripts/dclaude.yaml.example`
 
-Sample launcher mount config:
+Example launcher mount config (users copy to `scripts/dclaude.yaml` and uncomment):
 
-- uses a single `mounts:` list
+- uses a single `read_only_mounts:` list
 - entries are host directory paths such as `~/Desktop` or `/tmp/dclaude-share`
 - entries are bind-mounted read-only at the same absolute path inside the container
 - entries that overlap `~/.ssh` or `/run/host-services` are rejected so SSH only enters through `--ssh`
-- the checked-in sample preserves the historical `Desktop` and `Downloads` defaults
-- at runtime, the launcher reads `scripts/dclaude.yaml` from the launcher repo
+- no mounts are configured by default; the example file ships with commented-out entries
+- at runtime, the launcher reads `scripts/dclaude.yaml` from the launcher repo (if present)
 
 ### `scripts/bump_version.py`
 
@@ -116,8 +116,7 @@ Always mounted:
 
 Default folder config when no `scripts/dclaude.yaml` is present:
 
-- `~/Desktop` at the same path, read-only
-- `~/Downloads` at the same path, read-only
+- none — no extra host directories are mounted
 
 Claude-only state:
 
