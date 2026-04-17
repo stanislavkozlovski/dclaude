@@ -100,15 +100,45 @@ Some features:
 - a trusted repo
 - Docker Desktop file sharing enabled for the repo path and each configured home mount on macOS
 
-## Homebrew Install
+## Option A: Homebrew
 
 ```bash
 brew install stanislavkozlovski/tap/dclaude
 ```
 
+Optionally, configure read-only host directories the container can see:
+
+```bash
+DCLAUDE_HOME="$(dirname "$(readlink -f "$(which dclaude)")")"
+cp "$DCLAUDE_HOME/scripts/dclaude.yaml.example" "$DCLAUDE_HOME/scripts/dclaude.yaml"
+# edit dclaude.yaml to add your read-only mounts
+```
+
+## Option B: Git Clone
+
+```bash
+git clone https://github.com/stanislavkozlovski/dclaude.git ~/dclaude
+```
+
+Add to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.):
+
+```bash
+alias dclaude='~/dclaude/dclaude'
+alias dcodex='~/dclaude/dcodex'
+```
+
+Optionally, configure read-only host directories the container can see:
+
+```bash
+cp ~/dclaude/scripts/dclaude.yaml.example ~/dclaude/scripts/dclaude.yaml
+# edit dclaude.yaml to add your read-only mounts
+```
+
 # How to Run
 
 ## Quick Start
+
+The container gets **read/write** access to your current repo and **read-only** access to any directories you configure in `scripts/dclaude.yaml`. Nothing else from your host is exposed.
 
 From the repo you want to edit, run:
 
@@ -167,19 +197,25 @@ Examples:
 
 ## Folder Mount Config
 
-The launcher reads a single config file at `scripts/dclaude.yaml` in the `dclaude` repo. If no config is present, the default read-only mounts stay `~/Desktop` and `~/Downloads`.
+The launcher reads a single config file at `scripts/dclaude.yaml` in the `dclaude` repo. If no config is present, no extra host directories are mounted beyond the repo itself and shared caches.
+
+To get started, copy the example and edit it:
+
+```bash
+cp scripts/dclaude.yaml.example scripts/dclaude.yaml
+```
 
 Config shape:
 
 ```yaml
-mounts:
-  - /Desktop
-  - /Downloads
+read_only_mounts:
+  - ~/Desktop
+  - ~/Downloads
 ```
 
-Each entry is relative to `$HOME` and is bind-mounted read-only at the same absolute path inside the container. `/Desktop` becomes `$HOME/Desktop`.
+Each entry is an absolute path or starts with `~/` (resolved to `$HOME`). Entries are bind-mounted read-only at the same absolute path inside the container.
 
-Use `mounts: []` when the launcher should not expose any extra host directories beyond the repo itself and the shared caches.
+Use `read_only_mounts: []` to explicitly mount no extra directories.
 
 Configured mounts that overlap `~/.ssh` or `/run/host-services` are rejected. SSH access is only exposed through `--ssh`.
 
@@ -234,14 +270,13 @@ Deliberately omitted:
 
 The Docker build context also ignores any repo-local `.ssh` directory.
 
-Verify the Desktop and Downloads mounts are read-only with:
+Verify configured read-only mounts by trying to write to them inside the container:
 
 ```bash
-touch ~/Desktop/test
-touch ~/Downloads/test
+touch ~/Desktop/test   # should fail if ~/Desktop is in your dclaude.yaml
 ```
 
-Both commands should fail inside the container with the default config. If you override the folder config, test the paths listed in `scripts/dclaude.yaml` instead. Writing in the repo should still succeed.
+Writing in the repo should still succeed.
 
 ## Auth Persistence
 
@@ -256,7 +291,7 @@ Every bind mount is listed below. If the access column says `read/write`, edits 
 | `~/.cache/dclaude/cx` | `~/.cache/cx` | all launches | read/write | yes | `cx` cache |
 | `~/.cache/pip` | `~/.cache/pip` | all launches | read/write | yes | pip cache |
 | `~/.cache/uv` | `~/.cache/uv` | all launches | read/write | yes | uv cache |
-| configured home mounts such as `~/Desktop` and `~/Downloads` | same absolute path | all launches | read-only | no | extra host files exposed to the container |
+| configured read-only mounts from `scripts/dclaude.yaml` | same absolute path | all launches | read-only | no | extra host files exposed to the container |
 | `~/.claude` | `~/.claude` | Claude only | read/write | yes | Claude auth and state |
 | `~/.claude.json` | `~/.claude.json` | Claude only | read/write | yes | Claude auth file |
 | `~/.config/claude-code` | `~/.config/claude-code` | Claude only | read/write | yes | Claude CLI config |
@@ -290,7 +325,7 @@ Primary docs live under [`docs/`](docs/):
 - [Motivation](docs/motivation.md)
 - [License](docs/LICENSE)
 - [Version](docs/VERSION)
-- [Sample config](scripts/dclaude.yaml)
+- [Sample config](scripts/dclaude.yaml.example)
 
 ## Runtime Model
 
@@ -301,7 +336,7 @@ Every launch does the following:
 - ensures a warm per-tool container exists for that target repo
 - bind-mounts the launcher bootstrap script into the container so launcher script changes take effect on warm-container recreation
 - bind-mounts the repo read/write at its real host path
-- bind-mounts configured read-only directories at the same path, defaulting to `~/Desktop` and `~/Downloads`
+- bind-mounts configured read-only directories at the same path (none by default; see `scripts/dclaude.yaml.example`)
 - bind-mounts a persistent container-specific `cx` cache
 - runs as the current host UID/GID
 - sets `HOME` to the host home path

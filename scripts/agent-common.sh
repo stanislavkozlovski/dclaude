@@ -21,7 +21,7 @@ read_version() {
 
 DCLAUDE_VERSION="${DCLAUDE_VERSION:-$(read_version)}"
 DCLAUDE_IMAGE_NAME="${DCLAUDE_IMAGE_NAME:-dclaude:${DCLAUDE_VERSION}}"
-DEFAULT_HOME_MOUNTS=("~/Desktop" "~/Downloads")
+DEFAULT_HOME_MOUNTS=()
 CONFIGURED_HOME_MOUNTS=("${DEFAULT_HOME_MOUNTS[@]}")
 ACTIVE_MOUNT_CONFIG=""
 RESET_WARM_CONTAINER=0
@@ -607,17 +607,17 @@ load_configured_home_mounts() {
     [ -n "$trimmed" ] || continue
 
     case "$trimmed" in
-      "mounts:")
-        [ "$saw_mounts_section" -eq 0 ] || die "duplicate mounts section in $config_path"
+      "read_only_mounts:")
+        [ "$saw_mounts_section" -eq 0 ] || die "duplicate read_only_mounts section in $config_path"
         saw_mounts_section=1
         ;;
-      "mounts: []")
-        [ "$saw_mounts_section" -eq 0 ] || die "duplicate mounts section in $config_path"
+      "read_only_mounts: []")
+        [ "$saw_mounts_section" -eq 0 ] || die "duplicate read_only_mounts section in $config_path"
         saw_mounts_section=1
         return 0
         ;;
       -\ *)
-        [ "$saw_mounts_section" -eq 1 ] || die "mount list entry found before mounts section in $config_path"
+        [ "$saw_mounts_section" -eq 1 ] || die "mount list entry found before read_only_mounts section in $config_path"
         mount_suffix="${trimmed#-}"
         mount_suffix="${mount_suffix#"${mount_suffix%%[![:space:]]*}"}"
         mount_suffix="$(normalize_home_mount_suffix "$mount_suffix" "$config_path")"
@@ -630,7 +630,7 @@ load_configured_home_mounts() {
     esac
   done < "$config_path"
 
-  [ "$saw_mounts_section" -eq 1 ] || die "missing mounts section in $config_path"
+  [ "$saw_mounts_section" -eq 1 ] || die "missing read_only_mounts section in $config_path"
 }
 
 ensure_required_paths() {
