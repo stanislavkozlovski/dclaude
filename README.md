@@ -20,7 +20,24 @@ Includes `cx` for lower token usage.
 
 <br>
 
+<p align="center">
+  <i>“Ever have a 1-minute task take you 10+ minutes because it's stuck waiting on you approving multiple chained commands?”</i>
+  <br />
+  <sub>— I have, many times.</sub>
+</p>
+
 </div>
+
+
+```bash
+$ cd $WORK_FOLDER
+$ dclaude
+$ dcodex
+
+# Claude Code or Codex with full permissions;
+# No yes/no time wasting.
+# Limited. Can read only the current folder and optional whitelisted ones.
+```
 
 # The What
 
