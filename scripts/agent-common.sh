@@ -301,6 +301,79 @@ remove_warm_container() {
   fi
 }
 
+container_launch_mount_arg() {
+  printf 'type=bind,src=%s,dst=/usr/local/bin/dclaude-container-launch,readonly\n' \
+    "$TOOL_HOME/scripts/container-launch.sh"
+}
+
+remove_container_launch_mount() {
+  local mount_arg
+  local i
+  local -a filtered_args=()
+
+  mount_arg="$(container_launch_mount_arg)"
+
+  i=0
+  while [ "$i" -lt "${#DOCKER_ARGS[@]}" ]; do
+    if [ "${DOCKER_ARGS[$i]}" = "--mount" ] \
+      && [ $((i + 1)) -lt "${#DOCKER_ARGS[@]}" ] \
+      && [ "${DOCKER_ARGS[$((i + 1))]}" = "$mount_arg" ]; then
+      i=$((i + 2))
+      continue
+    fi
+
+    filtered_args+=("${DOCKER_ARGS[$i]}")
+    i=$((i + 1))
+  done
+
+  DOCKER_ARGS=("${filtered_args[@]}")
+}
+
+should_retry_without_container_launch_mount() {
+  local stderr_path="$1"
+  local container_launch_path="$TOOL_HOME/scripts/container-launch.sh"
+
+  grep -Eq 'invalid mount config for type "bind"|Mounts denied' "$stderr_path" \
+    && grep -Fq "$container_launch_path" "$stderr_path"
+}
+
+start_warm_container() {
+  local stderr_file
+  local status
+
+  stderr_file="$(mktemp)"
+
+  if docker "${DOCKER_ARGS[@]}" \
+    "$DCLAUDE_IMAGE_NAME" \
+    tail -f /dev/null >/dev/null 2>"$stderr_file"; then
+    rm -f "$stderr_file"
+    return 0
+  fi
+
+  status=$?
+
+  if should_retry_without_container_launch_mount "$stderr_file"; then
+    # Homebrew/macOS installs can expose the wrapper file to the shell while the
+    # Docker backend still rejects binding that path; fall back to the copy baked
+    # into the image instead of failing the launch outright.
+    echo "warning: docker rejected bind mounting $TOOL_HOME/scripts/container-launch.sh; using the launcher baked into the image instead" >&2
+    remove_container_launch_mount
+
+    if docker "${DOCKER_ARGS[@]}" \
+      "$DCLAUDE_IMAGE_NAME" \
+      tail -f /dev/null >/dev/null 2>"$stderr_file"; then
+      rm -f "$stderr_file"
+      return 0
+    fi
+
+    status=$?
+  fi
+
+  cat "$stderr_file" >&2
+  rm -f "$stderr_file"
+  return "$status"
+}
+
 create_warm_container() {
   local tool="$1"
 
@@ -328,9 +401,10 @@ create_warm_container() {
     append_ssh_mounts
   fi
 
-  docker "${DOCKER_ARGS[@]}" \
-    "$DCLAUDE_IMAGE_NAME" \
-    tail -f /dev/null >/dev/null
+  if ! start_warm_container; then
+    remove_warm_container
+    die "failed to create warm container $WARM_CONTAINER_NAME"
+  fi
 
   if ! docker exec \
     --user "$HOST_UID:$HOST_GID" \
@@ -782,7 +856,7 @@ append_common_mounts() {
 
   DOCKER_ARGS+=(
     --mount "type=bind,src=$TARGET_REPO_ROOT,dst=$TARGET_REPO_ROOT"
-    --mount "type=bind,src=$TOOL_HOME/scripts/container-launch.sh,dst=/usr/local/bin/dclaude-container-launch,readonly"
+    --mount "$(container_launch_mount_arg)"
     --mount "type=bind,src=$HOST_HOME/.cache/dclaude/cx,dst=$HOST_HOME/.cache/cx"
     --mount "type=bind,src=$HOST_HOME/.cache/pip,dst=$HOST_HOME/.cache/pip"
     --mount "type=bind,src=$HOST_HOME/.cache/uv,dst=$HOST_HOME/.cache/uv"
