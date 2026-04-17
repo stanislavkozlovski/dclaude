@@ -353,6 +353,9 @@ start_warm_container() {
   status=$?
 
   if should_retry_without_container_launch_mount "$stderr_file"; then
+    # Homebrew/macOS installs can expose the wrapper file to the shell while the
+    # Docker backend still rejects binding that path; fall back to the copy baked
+    # into the image instead of failing the launch outright.
     echo "warning: docker rejected bind mounting $TOOL_HOME/scripts/container-launch.sh; using the launcher baked into the image instead" >&2
     remove_container_launch_mount
 
