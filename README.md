@@ -163,7 +163,8 @@ If you prefer, calling the launcher by its full path also works as long as your 
 /path/to/dclaude-repo/dcodex
 ```
 
-The first run builds the shared image automatically from the launcher repo and starts a warm container for the current repo. Later runs `docker exec` into that warm container unless you pass `--reset` or `--rebuild`.
+> [!NOTE]
+> The very first `dcodex`/`dclaude` run can take around 60 seconds while Docker builds the image. Subsequent runs are instant.
 
 Wrapper options:
 
