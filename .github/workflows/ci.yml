@@ -71,6 +71,8 @@ jobs:
       - lint
       - smoke
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
     concurrency:
       group: dclaude-release-main
       cancel-in-progress: false
@@ -90,9 +92,25 @@ jobs:
         run: |
           version="$(python3 scripts/bump_version.py)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Resolve release metadata
+        id: meta
+        run: |
+          echo "tag=v${{ steps.bump.outputs.version }}" >> "$GITHUB_OUTPUT"
       - name: Commit and tag release
         run: |
           git add docs/VERSION
           git commit -m "chore: release v${{ steps.bump.outputs.version }}"
-          git tag "v${{ steps.bump.outputs.version }}"
+          git tag "${{ steps.meta.outputs.tag }}"
           git push origin main --follow-tags
+
+  publish_release:
+    if: ${{ needs.release_from_main.result == 'success' }}
+    needs:
+      - release_from_main
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.release_from_main.outputs.tag }}
+      target_ref: ${{ needs.release_from_main.outputs.tag }}
+    secrets: inherit
