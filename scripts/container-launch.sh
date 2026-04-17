@@ -91,9 +91,11 @@ FRONT
     render_cx_guidance > "$agents_file"
     log "Created $agents_file with cx guidance"
   elif ! file_has_cx_guidance "$agents_file"; then
-    printf '\n' >> "$agents_file"
-    render_cx_guidance >> "$agents_file"
-    printf '\n' >> "$agents_file"
+    {
+      printf '\n'
+      render_cx_guidance
+      printf '\n'
+    } >> "$agents_file"
     log "Appended cx guidance to $agents_file"
   fi
 }
