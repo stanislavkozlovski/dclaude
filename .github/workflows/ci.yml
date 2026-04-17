@@ -51,8 +51,8 @@ jobs:
           trap 'rm -rf .ssh' EXIT
           mkdir -p .ssh
           printf 'sentinel\n' > .ssh/marker
-          docker build -f - . <<'EOF'
-          FROM alpine:3.21
+          docker build --pull=false -f - . <<EOF
+          FROM dclaude:$(cat docs/VERSION)
           COPY . /ctx
           RUN test ! -e /ctx/.ssh && test ! -e /ctx/.ssh/marker
           EOF
