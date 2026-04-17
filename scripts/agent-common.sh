@@ -522,7 +522,7 @@ normalize_home_mount_suffix() {
 
   case "$mount_suffix" in
     "$TILDE_HOME"/*)
-      mount_suffix="$HOST_HOME/${mount_suffix#"~/"}"
+      mount_suffix="$HOST_HOME/${mount_suffix#"$TILDE_HOME"/}"
       ;;
     "$TILDE_HOME")
       mount_suffix="$HOST_HOME"
