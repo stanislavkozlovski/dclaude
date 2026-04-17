@@ -22,6 +22,7 @@ read_version() {
 DCLAUDE_VERSION="${DCLAUDE_VERSION:-$(read_version)}"
 DCLAUDE_IMAGE_NAME="${DCLAUDE_IMAGE_NAME:-dclaude:${DCLAUDE_VERSION}}"
 DEFAULT_HOME_MOUNTS=()
+TILDE_HOME='~'
 CONFIGURED_HOME_MOUNTS=("${DEFAULT_HOME_MOUNTS[@]}")
 ACTIVE_MOUNT_CONFIG=""
 RESET_WARM_CONTAINER=0
@@ -520,10 +521,10 @@ normalize_home_mount_suffix() {
   raw_mount_suffix="$mount_suffix"
 
   case "$mount_suffix" in
-    "~/"*)
+    "$TILDE_HOME"/*)
       mount_suffix="$HOST_HOME/${mount_suffix#"~/"}"
       ;;
-    "~")
+    "$TILDE_HOME")
       mount_suffix="$HOST_HOME"
       ;;
     /*)
@@ -602,6 +603,7 @@ load_configured_home_mounts() {
   ACTIVE_MOUNT_CONFIG="$config_path"
   CONFIGURED_HOME_MOUNTS=()
 
+  # shellcheck disable=SC2094
   while IFS= read -r line || [ -n "$line" ]; do
     trimmed="$(trim_config_line "$line")"
     [ -n "$trimmed" ] || continue
