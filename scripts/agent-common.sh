@@ -779,14 +779,25 @@ validate_wrapper_args() {
 
 append_common_mounts() {
   local mount_path
+  local container_launch_path="$TOOL_HOME/scripts/container-launch.sh"
 
   DOCKER_ARGS+=(
     --mount "type=bind,src=$TARGET_REPO_ROOT,dst=$TARGET_REPO_ROOT"
-    --mount "type=bind,src=$TOOL_HOME/scripts/container-launch.sh,dst=/usr/local/bin/dclaude-container-launch,readonly"
     --mount "type=bind,src=$HOST_HOME/.cache/dclaude/cx,dst=$HOST_HOME/.cache/cx"
     --mount "type=bind,src=$HOST_HOME/.cache/pip,dst=$HOST_HOME/.cache/pip"
     --mount "type=bind,src=$HOST_HOME/.cache/uv,dst=$HOST_HOME/.cache/uv"
   )
+
+  case "$TOOL_HOME" in
+    */Cellar/*)
+      ;;
+    *)
+      [ -f "$container_launch_path" ] || die "missing container launch script at $container_launch_path"
+      DOCKER_ARGS+=(
+        --mount "type=bind,src=$container_launch_path,dst=/usr/local/bin/dclaude-container-launch,readonly"
+      )
+      ;;
+  esac
 
   if (( ${#CONFIGURED_HOME_MOUNTS[@]} > 0 )); then
     for mount_path in "${CONFIGURED_HOME_MOUNTS[@]}"; do
