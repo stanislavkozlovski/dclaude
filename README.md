@@ -173,8 +173,10 @@ Wrapper options:
 - `--rebuild` forces a fresh `docker build` and recreates the warm container
 - `--reset` recreates the warm container before launching
 - `--stop` removes the warm container for the current repo and exits
+- `--check-update` checks whether a newer `dclaude`/`dcodex` launcher release exists
+- `--update-launcher` updates the `dclaude`/`dcodex` launcher itself after confirmation
 - `--update-tool` checks the latest upstream version for this wrapper's CLI, rewrites the pin in the launcher repo, and rebuilds the image after confirmation
-- `--yes` skips the confirmation prompt for `--update-tool`
+- `--yes` skips the confirmation prompt for `--update-launcher` or `--update-tool`
 - `--ssh` enables SSH agent forwarding by mounting `/run/host-services/ssh-auth.sock` and `~/.ssh/known_hosts` when available
 - `--profile NAME` (Codex only) uses a named profile with a separate `~/.codex-NAME` config directory, giving you isolated auth, state, and skills per profile
 - `--list-profiles` (Codex only) lists available Codex profiles
@@ -189,6 +191,9 @@ Examples:
 ./dclaude --rebuild
 ./dcodex --reset
 ./dcodex --stop
+./dclaude --check-update
+./dclaude --update-launcher
+./dclaude --update-launcher --yes
 ./dcodex --update-tool
 ./dcodex --update-tool --yes
 ./dclaude --ssh
@@ -389,6 +394,20 @@ The image currently pins the installed CLI versions:
 - `cx 0.6.5`
 
 The Codex full-access launcher was validated against `codex-cli 0.128.0`, which supports `--dangerously-bypass-approvals-and-sandbox`.
+
+## Launcher Updates
+
+Normal interactive launches check for a newer `dclaude` GitHub release at most once per day. If one exists, the wrapper prompts before updating itself. Set `DCLAUDE_NO_UPDATE_CHECK=1` to disable the automatic check.
+
+Manual checks and updates do not require Docker or a target git repo:
+
+```bash
+dclaude --check-update
+dclaude --update-launcher
+dclaude --update-launcher --yes
+```
+
+`--update-launcher` uses `git -C "$TOOL_HOME" pull --ff-only` for git-clone installs, `brew update && brew upgrade dclaude` for Homebrew installs, and prints the release URL for other install shapes.
 
 ## Tool Pin Refreshes
 
