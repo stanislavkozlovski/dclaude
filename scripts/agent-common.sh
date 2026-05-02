@@ -28,9 +28,15 @@ ACTIVE_MOUNT_CONFIG=""
 RESET_WARM_CONTAINER=0
 STOP_WARM_CONTAINER=0
 UPDATE_TOOL=0
+UPDATE_LAUNCHER=0
+CHECK_LAUNCHER_UPDATE=0
 ASSUME_YES=0
 AGENT_PROFILE=""
 LIST_PROFILES=0
+LAUNCHER_UPDATE_AVAILABLE=0
+LAUNCHER_UPDATE_LATEST=""
+LAUNCHER_UPDATE_METHOD=""
+LAUNCHER_UPDATE_DETAIL=""
 WARM_CONTAINER_NAME=""
 WARM_CONTAINER_SPEC_HASH=""
 WARM_CONTAINER_STATUS=""
@@ -39,14 +45,16 @@ WARM_CONTAINER_SPEC_VERSION=4
 usage() {
   local tool="$1"
   cat <<EOF
-usage: $tool [--rebuild] [--reset] [--stop] [--update-tool] [--yes] [--ssh] [--] [tool args...]
+usage: $tool [--rebuild] [--reset] [--stop] [--check-update] [--update-launcher] [--update-tool] [--yes] [--ssh] [--] [tool args...]
 
 Options:
   --rebuild  rebuild the Docker image and recreate the warm container
   --reset    recreate the warm container before launching
   --stop     stop and remove the warm container for the current repo
+  --check-update  check whether a newer dclaude launcher release exists
+  --update-launcher  update the dclaude/dcodex launcher itself
   --update-tool  update the pinned upstream CLI version for this wrapper and rebuild the image
-  --yes      skip the confirmation prompt for --update-tool
+  --yes      skip the confirmation prompt for --update-launcher or --update-tool
   --ssh      forward the host SSH agent socket and known_hosts when available
   --profile NAME  use a named Codex profile (separate ~/.codex-NAME directory)
   --list-profiles  list available Codex profiles
@@ -58,6 +66,9 @@ Examples:
   $tool -- --help
   $tool --reset
   $tool --stop
+  $tool --check-update
+  $tool --update-launcher
+  $tool --update-launcher --yes
   $tool --update-tool
   $tool --update-tool --yes
   $tool --ssh
@@ -496,7 +507,39 @@ tool_update_selector() {
   esac
 }
 
-prompt_confirm() {
+semver_gt() {
+  local candidate="$1"
+  local current="$2"
+  local candidate_major
+  local candidate_minor
+  local candidate_patch
+  local current_major
+  local current_minor
+  local current_patch
+
+  IFS='.' read -r candidate_major candidate_minor candidate_patch <<< "$candidate"
+  IFS='.' read -r current_major current_minor current_patch <<< "$current"
+
+  if (( candidate_major > current_major )); then
+    return 0
+  fi
+  if (( candidate_major < current_major )); then
+    return 1
+  fi
+  if (( candidate_minor > current_minor )); then
+    return 0
+  fi
+  if (( candidate_minor < current_minor )); then
+    return 1
+  fi
+  if (( candidate_patch > current_patch )); then
+    return 0
+  fi
+
+  return 1
+}
+
+prompt_yes_no() {
   local prompt="$1"
   local reply
 
@@ -505,23 +548,254 @@ prompt_confirm() {
   fi
 
   if ! { exec 3<> /dev/tty; } 2>/dev/null; then
-    die "confirmation required; rerun with --yes"
+    return 2
   fi
 
   printf '%s [y/N] ' "$prompt" >&3
   if ! IFS= read -r reply <&3; then
     exec 3>&-
-    die "aborted"
+    return 1
   fi
   exec 3>&-
 
   case "$reply" in
     y|Y|yes|YES|Yes)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+prompt_confirm() {
+  local prompt="$1"
+  local status=0
+
+  prompt_yes_no "$prompt" || status=$?
+  case "$status" in
+    0)
+      return 0
+      ;;
+    2)
+      die "confirmation required; rerun with --yes"
       ;;
     *)
       die "aborted"
       ;;
   esac
+}
+
+launcher_update_check_url() {
+  printf '%s\n' "${DCLAUDE_LATEST_RELEASE_URL:-https://github.com/stanislavkozlovski/dclaude/releases/latest}"
+}
+
+launcher_update_release_url() {
+  local version="$1"
+
+  printf 'https://github.com/stanislavkozlovski/dclaude/releases/tag/v%s\n' "$version"
+}
+
+launcher_update_cache_file() {
+  printf '%s\n' "${DCLAUDE_UPDATE_CHECK_FILE:-$HOST_HOME/.cache/dclaude/launcher-update-check}"
+}
+
+launcher_update_check_due() {
+  local cache_file
+  local checked_at
+  local interval
+  local now
+
+  cache_file="$(launcher_update_cache_file)"
+  [ -f "$cache_file" ] || return 0
+
+  checked_at="$(sed -n '1p' "$cache_file" 2>/dev/null || true)"
+  [[ "$checked_at" =~ ^[0-9]+$ ]] || return 0
+
+  interval="${DCLAUDE_UPDATE_CHECK_INTERVAL_SECONDS:-86400}"
+  [[ "$interval" =~ ^[0-9]+$ ]] || interval=86400
+  [ "$interval" -gt 0 ] || return 0
+
+  now="$(date +%s)"
+  [ $((now - checked_at)) -ge "$interval" ]
+}
+
+mark_launcher_update_checked() {
+  local cache_dir
+  local cache_file
+  local now
+
+  cache_file="$(launcher_update_cache_file)"
+  cache_dir="$(dirname "$cache_file")"
+  now="$(date +%s)"
+
+  mkdir -p "$cache_dir" 2>/dev/null || return 0
+  printf '%s\n' "$now" > "$cache_file" 2>/dev/null || true
+}
+
+fetch_latest_launcher_version() {
+  local check_url
+  local connect_timeout
+  local latest_url
+  local max_time
+
+  command -v curl >/dev/null 2>&1 || return 1
+
+  check_url="$(launcher_update_check_url)"
+  connect_timeout="${DCLAUDE_UPDATE_CONNECT_TIMEOUT_SECONDS:-2}"
+  max_time="${DCLAUDE_UPDATE_MAX_TIME_SECONDS:-5}"
+
+  [[ "$connect_timeout" =~ ^[0-9]+$ ]] || connect_timeout=2
+  [[ "$max_time" =~ ^[0-9]+$ ]] || max_time=5
+
+  latest_url="$(
+    curl -fsSLI \
+      -o /dev/null \
+      -w '%{url_effective}' \
+      --connect-timeout "$connect_timeout" \
+      --max-time "$max_time" \
+      "$check_url" 2>/dev/null
+  )" || return 1
+
+  if [[ "$latest_url" =~ /tag/v([0-9]+[.][0-9]+[.][0-9]+)([/\?#].*)?$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+
+  return 1
+}
+
+load_launcher_update_status() {
+  LAUNCHER_UPDATE_LATEST="$(fetch_latest_launcher_version)" || return 1
+
+  if semver_gt "$LAUNCHER_UPDATE_LATEST" "$DCLAUDE_VERSION"; then
+    LAUNCHER_UPDATE_AVAILABLE=1
+  else
+    LAUNCHER_UPDATE_AVAILABLE=0
+  fi
+}
+
+resolve_launcher_update_method() {
+  local git_root
+
+  LAUNCHER_UPDATE_METHOD=""
+  LAUNCHER_UPDATE_DETAIL=""
+
+  if command -v git >/dev/null 2>&1; then
+    git_root="$(git -C "$TOOL_HOME" rev-parse --show-toplevel 2>/dev/null || true)"
+    if [ -n "$git_root" ]; then
+      git_root="$(cd "$git_root" && pwd -P)"
+      if [ "$git_root" = "$TOOL_HOME" ]; then
+        LAUNCHER_UPDATE_METHOD="git"
+        LAUNCHER_UPDATE_DETAIL="git -C $TOOL_HOME pull --ff-only"
+        return 0
+      fi
+    fi
+  fi
+
+  if command -v brew >/dev/null 2>&1 && brew --prefix dclaude >/dev/null 2>&1; then
+    LAUNCHER_UPDATE_METHOD="brew"
+    LAUNCHER_UPDATE_DETAIL="brew update && brew upgrade dclaude"
+    return 0
+  fi
+
+  LAUNCHER_UPDATE_METHOD="manual"
+  LAUNCHER_UPDATE_DETAIL="$(launcher_update_release_url "$LAUNCHER_UPDATE_LATEST")"
+}
+
+run_launcher_update() {
+  case "$LAUNCHER_UPDATE_METHOD" in
+    git)
+      git -C "$TOOL_HOME" pull --ff-only
+      ;;
+    brew)
+      brew update
+      brew upgrade dclaude
+      ;;
+    manual)
+      echo "Update manually from $LAUNCHER_UPDATE_DETAIL" >&2
+      ;;
+    *)
+      die "unsupported launcher update method: $LAUNCHER_UPDATE_METHOD"
+      ;;
+  esac
+}
+
+print_launcher_update_status() {
+  if [ "$LAUNCHER_UPDATE_AVAILABLE" -eq 1 ]; then
+    echo "dclaude update available: current=$DCLAUDE_VERSION latest=$LAUNCHER_UPDATE_LATEST" >&2
+    resolve_launcher_update_method
+    echo "Update method: $LAUNCHER_UPDATE_DETAIL" >&2
+  else
+    echo "dclaude is up to date at $DCLAUDE_VERSION" >&2
+  fi
+}
+
+check_launcher_update() {
+  load_launcher_update_status || die "failed to resolve latest dclaude release"
+  print_launcher_update_status
+}
+
+perform_launcher_update() {
+  local dirty_status=""
+
+  load_launcher_update_status || die "failed to resolve latest dclaude release"
+
+  if [ "$LAUNCHER_UPDATE_AVAILABLE" -eq 0 ]; then
+    echo "dclaude is already up to date at $DCLAUDE_VERSION" >&2
+    return 0
+  fi
+
+  resolve_launcher_update_method
+
+  if [ "$LAUNCHER_UPDATE_METHOD" = "manual" ]; then
+    echo "dclaude current=$DCLAUDE_VERSION latest=$LAUNCHER_UPDATE_LATEST" >&2
+    echo "Update manually from $LAUNCHER_UPDATE_DETAIL" >&2
+    return 0
+  fi
+
+  if [ "$LAUNCHER_UPDATE_METHOD" = "git" ]; then
+    dirty_status="$(git -C "$TOOL_HOME" status --short 2>/dev/null || true)"
+    if [ -n "$dirty_status" ]; then
+      echo "Launcher repo has uncommitted changes:" >&2
+      printf '%s\n' "$dirty_status" >&2
+    fi
+  fi
+
+  echo "dclaude current=$DCLAUDE_VERSION latest=$LAUNCHER_UPDATE_LATEST" >&2
+  prompt_confirm "Update dclaude launcher using $LAUNCHER_UPDATE_DETAIL?"
+
+  run_launcher_update
+
+  echo "Updated dclaude launcher from $DCLAUDE_VERSION to $LAUNCHER_UPDATE_LATEST" >&2
+  echo "Rerun $WRAPPER_NAME to use the updated launcher." >&2
+}
+
+maybe_prompt_launcher_update() {
+  local prompt_status=0
+
+  [ "${DCLAUDE_NO_UPDATE_CHECK:-0}" != "1" ] || return 0
+  [ -t 0 ] && [ -t 1 ] || return 0
+  launcher_update_check_due || return 0
+  mark_launcher_update_checked
+
+  load_launcher_update_status || return 0
+  [ "$LAUNCHER_UPDATE_AVAILABLE" -eq 1 ] || return 0
+
+  resolve_launcher_update_method
+  echo "dclaude $LAUNCHER_UPDATE_LATEST is available; installed version is $DCLAUDE_VERSION." >&2
+
+  if [ "$LAUNCHER_UPDATE_METHOD" = "manual" ]; then
+    echo "Update manually from $LAUNCHER_UPDATE_DETAIL" >&2
+    return 0
+  fi
+
+  prompt_yes_no "Update dclaude launcher now using $LAUNCHER_UPDATE_DETAIL?" || prompt_status=$?
+  if [ "$prompt_status" -eq 0 ]; then
+    run_launcher_update
+    echo "Updated dclaude launcher. Rerun $WRAPPER_NAME to continue with the new version." >&2
+    exit 0
+  fi
 }
 
 load_tool_update_status() {
@@ -780,6 +1054,8 @@ parse_wrapper_args() {
   RESET_WARM_CONTAINER=0
   STOP_WARM_CONTAINER=0
   UPDATE_TOOL=0
+  UPDATE_LAUNCHER=0
+  CHECK_LAUNCHER_UPDATE=0
   ASSUME_YES=0
   TOOL_ARGS=()
 
@@ -796,6 +1072,12 @@ parse_wrapper_args() {
         ;;
       --stop)
         STOP_WARM_CONTAINER=1
+        ;;
+      --check-update)
+        CHECK_LAUNCHER_UPDATE=1
+        ;;
+      --update-launcher)
+        UPDATE_LAUNCHER=1
         ;;
       --update-tool)
         UPDATE_TOOL=1
@@ -834,16 +1116,32 @@ parse_wrapper_args() {
 }
 
 validate_wrapper_args() {
-  if [ "$ASSUME_YES" -eq 1 ] && [ "$UPDATE_TOOL" -eq 0 ]; then
-    die "--yes is only supported with --update-tool"
+  if [ "$ASSUME_YES" -eq 1 ] && [ "$UPDATE_TOOL" -eq 0 ] && [ "$UPDATE_LAUNCHER" -eq 0 ]; then
+    die "--yes is only supported with --update-launcher or --update-tool"
+  fi
+
+  if [ "$UPDATE_TOOL" -eq 1 ] && [ "$UPDATE_LAUNCHER" -eq 1 ]; then
+    die "--update-launcher cannot be combined with --update-tool"
+  fi
+
+  if [ "$CHECK_LAUNCHER_UPDATE" -eq 1 ] && { [ "$UPDATE_TOOL" -eq 1 ] || [ "$UPDATE_LAUNCHER" -eq 1 ]; }; then
+    die "--check-update cannot be combined with --update-launcher or --update-tool"
   fi
 
   if [ "$UPDATE_TOOL" -eq 1 ] && [ "$STOP_WARM_CONTAINER" -eq 1 ]; then
     die "--update-tool cannot be combined with --stop"
   fi
 
-  if [ "$LIST_PROFILES" -eq 1 ] && { [ "$UPDATE_TOOL" -eq 1 ] || [ "$STOP_WARM_CONTAINER" -eq 1 ] || [ "$REBUILD_IMAGE" -eq 1 ]; }; then
-    die "--list-profiles cannot be combined with --update-tool, --stop, or --rebuild"
+  if [ "$UPDATE_LAUNCHER" -eq 1 ] && [ "$STOP_WARM_CONTAINER" -eq 1 ]; then
+    die "--update-launcher cannot be combined with --stop"
+  fi
+
+  if [ "$CHECK_LAUNCHER_UPDATE" -eq 1 ] && [ "$STOP_WARM_CONTAINER" -eq 1 ]; then
+    die "--check-update cannot be combined with --stop"
+  fi
+
+  if [ "$LIST_PROFILES" -eq 1 ] && { [ "$UPDATE_TOOL" -eq 1 ] || [ "$UPDATE_LAUNCHER" -eq 1 ] || [ "$CHECK_LAUNCHER_UPDATE" -eq 1 ] || [ "$STOP_WARM_CONTAINER" -eq 1 ] || [ "$REBUILD_IMAGE" -eq 1 ]; }; then
+    die "--list-profiles cannot be combined with update, stop, or rebuild options"
   fi
 
   if [ "$LIST_PROFILES" -eq 1 ] && [ -n "$AGENT_PROFILE" ]; then
@@ -1042,12 +1340,25 @@ launch_agent() {
     exit 0
   fi
 
+  if [ "$UPDATE_LAUNCHER" -eq 1 ]; then
+    perform_launcher_update
+    exit 0
+  fi
+
+  if [ "$CHECK_LAUNCHER_UPDATE" -eq 1 ]; then
+    check_launcher_update
+    exit 0
+  fi
+
   if [ "$LIST_PROFILES" -eq 1 ]; then
     list_profiles
     exit 0
   fi
 
   ensure_target_repo
+  if [ "$STOP_WARM_CONTAINER" -eq 0 ]; then
+    maybe_prompt_launcher_update
+  fi
   ensure_docker
 
   if [ "$STOP_WARM_CONTAINER" -eq 1 ]; then

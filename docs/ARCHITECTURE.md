@@ -44,18 +44,20 @@ Thin wrappers that:
 - mount the target repo and support paths with same-path bind mounts
 - run the container as the current host UID/GID
 - launch the correct interactive CLI command
-- expose `--version` and `--update-tool` without requiring a target git repo
+- expose `--version`, `--check-update`, `--update-launcher`, and `--update-tool` without requiring a target git repo
 
 ### `scripts/agent-common.sh`
 
 Holds the shared launch logic:
 
 - version loading
+- throttled launcher self-update checks against the latest GitHub release
 - separation of tool home from target repo
 - optional `scripts/dclaude.yaml` loading and mount parsing
 - warm container naming, spec matching, reset, and stop flows
 - image-content-aware warm-container invalidation
 - bind-mounting the live launcher bootstrap script into warm containers
+- interactive confirmed `--update-launcher` flow for git and Homebrew installs
 - interactive confirmed `--update-tool` flow for the wrapper's pinned CLI
 - common Docker flags
 - mount assembly
@@ -157,6 +159,9 @@ Lifecycle controls:
 - `--reset` removes and recreates the warm container before launching
 - `--stop` removes the warm container for the current repo and exits
 - `--rebuild` rebuilds the image and recreates the warm container
+- `--check-update` checks whether a newer launcher release exists and exits
+- `--update-launcher` updates the launcher via git pull, Homebrew upgrade, or manual release URL guidance
+- normal interactive launches check for a newer launcher release at most once per day unless `DCLAUDE_NO_UPDATE_CHECK=1` is set
 
 Tool launch commands:
 
@@ -201,6 +206,7 @@ There are no tables, collections, migrations, or ORM models in this project. The
 - Claude auth/config: `~/.claude`, `~/.claude.json`, `~/.config/claude-code`
 - Codex state: `~/.codex` (or `~/.codex-NAME` per profile)
 - shared caches: `~/.cache/dclaude/cx` on host mapped to `~/.cache/cx` in-container, plus `~/.cache/pip`, `~/.cache/uv`
+- launcher update check throttle: `~/.cache/dclaude/launcher-update-check`
 
 Additional non-database runtime state:
 
