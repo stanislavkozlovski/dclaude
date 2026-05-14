@@ -427,7 +427,7 @@ dclaude --update-tool
 
 `--update-tool` checks the latest upstream version for the wrapper's own CLI, shows a confirmation prompt, rewrites the launcher pin and docs, rebuilds the image, and lets warm containers recreate automatically on their next launch. Use `--yes` to skip the confirmation prompt for scripted or non-interactive runs.
 
-A scheduled GitHub Actions workflow runs the same updater, validates that the image still builds, and opens a PR when upstream `@anthropic-ai/claude-code`, `@openai/codex`, or `cx` releases move.
+A scheduled GitHub Actions workflow runs the same updater, validates that the image still builds, and opens a PR when upstream `@anthropic-ai/claude-code`, `@openai/codex`, or `cx` releases move. The generated commit title and PR body list each pinned package transition, such as `claude-code 2.1.141->2.1.142`.
 
 ## Releases
 

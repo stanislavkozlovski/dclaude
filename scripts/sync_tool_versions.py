@@ -10,6 +10,7 @@ import re
 import sys
 import urllib.parse
 import urllib.request
+import uuid
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -28,6 +29,12 @@ DOCKER_PATTERNS = {
 TOOL_ALIASES = {
     "cx": "cx",
     "claude-code": "claude_code",
+    "codex": "codex",
+}
+
+TOOL_LABELS = {
+    "cx": "cx",
+    "claude_code": "claude-code",
     "codex": "codex",
 }
 
@@ -249,6 +256,64 @@ def print_status(current: ToolVersions, latest: ToolVersions, tools: tuple[str, 
         print(f"{label:12} current={current_value}  {status}")
 
 
+def changed_tool_rows(
+    current: ToolVersions,
+    latest: ToolVersions,
+    tools: tuple[str, ...],
+) -> list[tuple[str, str, str]]:
+    rows: list[tuple[str, str, str]] = []
+
+    for tool in tools:
+        current_value = getattr(current, tool)
+        latest_value = getattr(latest, tool)
+        if current_value != latest_value:
+            rows.append((TOOL_LABELS[tool], current_value, latest_value))
+
+    if (
+        "cx" in tools
+        and current.cx == latest.cx
+        and current.cx_sha256 != latest.cx_sha256
+    ):
+        rows.append(("cx sha256", current.cx_sha256, latest.cx_sha256))
+
+    return rows
+
+
+def short_value(value: str) -> str:
+    if re.fullmatch(r"[0-9a-f]{64}", value):
+        return value[:12]
+
+    return value
+
+
+def build_commit_subject(changed_rows: list[tuple[str, str, str]]) -> str:
+    summary = ", ".join(
+        f"{label} {short_value(current)}->{short_value(latest)}"
+        for label, current, latest in changed_rows
+    )
+    return f"chore: {summary}"
+
+
+def build_update_body(changed_rows: list[tuple[str, str, str]]) -> str:
+    bullets = "\n".join(
+        f"- `{label}`: `{current}` -> `{latest}`"
+        for label, current, latest in changed_rows
+    )
+    return (
+        "This auto commit updates the pinned tool versions:\n\n"
+        f"{bullets}\n\n"
+        "It also refreshes the matching `Dockerfile`, `README.md`, and `docs/ARCHITECTURE.md` pins.\n\n"
+        "Updated by `.github/workflows/tool-updates.yml`."
+    )
+
+
+def write_github_output(path: pathlib.Path, outputs: dict[str, str]) -> None:
+    with path.open("a", encoding="utf-8") as output_file:
+        for name, value in outputs.items():
+            delimiter = f"EOF_{uuid.uuid4().hex}"
+            output_file.write(f"{name}<<{delimiter}\n{value}\n{delimiter}\n")
+
+
 def build_status_payload(current: ToolVersions, latest: ToolVersions, tools: tuple[str, ...]) -> dict[str, object]:
     payload_tools: dict[str, dict[str, object]] = {}
 
@@ -302,11 +367,29 @@ def main() -> None:
         action="store_true",
         help="emit machine-readable status instead of human-readable rows",
     )
+    parser.add_argument(
+        "--github-output",
+        type=pathlib.Path,
+        help="append commit-message, title, and body outputs for GitHub Actions",
+    )
     args = parser.parse_args()
 
     current = read_current_versions()
     tools = selected_tools(args.tool)
     latest = resolve_latest_versions(current, tools)
+    changed_rows = changed_tool_rows(current, latest, tools)
+
+    if args.github_output and changed_rows:
+        subject = build_commit_subject(changed_rows)
+        body = build_update_body(changed_rows)
+        write_github_output(
+            args.github_output,
+            {
+                "commit_message": f"{subject}\n\n{body}",
+                "commit_title": subject,
+                "pull_request_body": body,
+            },
+        )
 
     if args.json:
         print(json.dumps(build_status_payload(current, latest, tools), sort_keys=True))

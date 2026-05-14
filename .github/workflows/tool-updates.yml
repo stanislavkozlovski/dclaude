@@ -18,7 +18,8 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
 
       - name: Refresh pinned tool versions
-        run: python3 scripts/sync_tool_versions.py --update
+        id: refresh
+        run: python3 scripts/sync_tool_versions.py --update --github-output "$GITHUB_OUTPUT"
 
       - name: Detect changes
         id: diff
@@ -46,9 +47,8 @@ jobs:
         with:
           branch: chore/tool-version-updates
           delete-branch: true
-          commit-message: "chore: refresh pinned tool versions"
-          title: "chore: refresh pinned tool versions"
-          body: |
-            Refresh pinned upstream tool versions in `Dockerfile` and the matching docs.
-
-            Updated by `.github/workflows/tool-updates.yml`.
+          commit-message: ${{ steps.refresh.outputs.commit_message }}
+          committer: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+          author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+          title: ${{ steps.refresh.outputs.commit_title }}
+          body: ${{ steps.refresh.outputs.pull_request_body }}

@@ -99,7 +99,7 @@ Runs shell linting and smoke checks on pull requests and `main`. On successful n
 
 ### `.github/workflows/tool-updates.yml`
 
-Runs on a schedule and on manual dispatch. It refreshes pinned upstream tool versions, verifies the updated image still builds, and opens a pull request when changes are detected.
+Runs on a schedule and on manual dispatch. It refreshes pinned upstream tool versions, verifies the updated image still builds, and opens a pull request when changes are detected. The updater writes the pull request title, commit message, and body from the detected old-to-new version transitions.
 
 ### `.github/workflows/release.yml`
 
