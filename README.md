@@ -389,7 +389,7 @@ docker build -t "dclaude:$(cat docs/VERSION)" .
 
 The image currently pins the installed CLI versions:
 
-- `@anthropic-ai/claude-code@2.1.139`
+- `@anthropic-ai/claude-code@2.1.141`
 - `@openai/codex@0.130.0`
 - `cx 0.6.5`
 
