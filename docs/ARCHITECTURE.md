@@ -8,7 +8,7 @@ This repo provides a Dockerized wrapper around the official Claude Code and Code
 - two user-facing entrypoints: `dclaude` and `dcodex`
 - one shared shell helper for runtime assembly
 - one `docs/VERSION` file that drives image naming and releases
-- three GitHub Actions workflows for CI, scheduled tool refreshes, and tagged releases
+- four GitHub Actions workflows for CI, scheduled tool refreshes, green tool-update auto-merges, and tagged releases
 
 The design goal is path fidelity. The target repo and configured read-only directories are mounted into the container at the same absolute paths they have on the host. When no launcher config is present, no extra host directories are mounted. `/workspace` exists only as a compatibility alias.
 
@@ -99,7 +99,11 @@ Runs shell linting and smoke checks on pull requests and `main`. On successful n
 
 ### `.github/workflows/tool-updates.yml`
 
-Runs on a schedule and on manual dispatch. It refreshes pinned upstream tool versions, verifies the updated image still builds, and opens a pull request when changes are detected. The updater writes the pull request title, commit message, and body from the detected old-to-new version transitions.
+Runs on a schedule and on manual dispatch. It refreshes pinned upstream tool versions, verifies the updated image still builds, and opens a pull request when changes are detected. The updater writes the pull request title, commit message, and body from the detected old-to-new version transitions. It creates the pull request with `TOOL_UPDATE_TOKEN` so the normal pull request CI workflow runs.
+
+### `.github/workflows/tool-update-automerge.yml`
+
+Runs after the `ci` workflow completes. When CI succeeds for the `chore/tool-version-updates` branch, it verifies that the pull request head is the exact commit that passed CI, merges that pull request with `TOOL_UPDATE_TOKEN`, and deletes the branch. This makes tool-update pull requests merge on green without human review. `TOOL_UPDATE_TOKEN` must belong to an account that can push branches, open pull requests, and merge this repo; if branch rules require reviews, that account must be allowed to bypass those review rules.
 
 ### `.github/workflows/release.yml`
 
@@ -190,6 +194,7 @@ Container startup bootstrap:
 Release automation:
 
 - scheduled automation checks for newer upstream `cx`, Claude Code, and Codex releases and proposes pin updates via pull requests
+- tool-update pull requests run normal CI and merge automatically after CI passes
 - CI increments the patch version after successful pushes to `main`
 - release tags are `vX.Y.Z`
 - tag builds publish a source tarball consumed by the Homebrew tap
