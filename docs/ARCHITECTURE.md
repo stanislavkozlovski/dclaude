@@ -25,7 +25,7 @@ The launcher repo provides the image and shell assets. The target repo provides 
 
 Builds the shared runtime image on top of `python:3.12-slim`, installs Node 22, `uv`, and the official CLI packages:
 
-- `@anthropic-ai/claude-code@2.1.212`
+- `@anthropic-ai/claude-code@2.1.214`
 - `@openai/codex@0.144.5`
 - `cx 0.7.1`
 
