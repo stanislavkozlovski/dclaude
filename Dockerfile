@@ -2,8 +2,8 @@
 
 FROM rust:1.89-slim-bookworm AS cx-builder
 
-ARG CX_VERSION=0.7.1
-ARG CX_SHA256=dc466ee69be5b262601bce6d4cfb9810c138bb3e756e674da45c3b0b645146bf
+ARG CX_VERSION=0.7.2
+ARG CX_SHA256=24a1c0aaef2e62bbabf0a3a4eb4ca71b803ef7bd612b311e3b3418f61b45b1a4
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -23,7 +23,7 @@ RUN curl -fsSL "https://github.com/ind-igo/cx/archive/refs/tags/v${CX_VERSION}.t
 FROM python:3.12-slim
 
 ARG NODE_MAJOR=22
-ARG CLAUDE_CODE_VERSION=2.1.217
+ARG CLAUDE_CODE_VERSION=2.1.218
 ARG CODEX_VERSION=0.145.0
 
 ENV DEBIAN_FRONTEND=noninteractive
