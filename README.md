@@ -389,11 +389,11 @@ docker build -t "dclaude:$(cat docs/VERSION)" .
 
 The image currently pins the installed CLI versions:
 
-- `@anthropic-ai/claude-code@2.1.223`
-- `@openai/codex@0.146.1`
+- `@anthropic-ai/claude-code@2.1.224`
+- `@openai/codex@0.147.0`
 - `cx 0.7.2`
 
-The Codex full-access launcher was validated against `codex-cli 0.146.1`, which supports `--dangerously-bypass-approvals-and-sandbox`.
+The Codex full-access launcher was validated against `codex-cli 0.147.0`, which supports `--dangerously-bypass-approvals-and-sandbox`.
 
 ## Launcher Updates
 
