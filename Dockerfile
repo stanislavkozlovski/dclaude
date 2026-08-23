@@ -23,7 +23,7 @@ RUN curl -fsSL "https://github.com/ind-igo/cx/archive/refs/tags/v${CX_VERSION}.t
 FROM python:3.12-slim
 
 ARG NODE_MAJOR=22
-ARG CLAUDE_CODE_VERSION=2.1.239
+ARG CLAUDE_CODE_VERSION=2.1.241
 ARG CODEX_VERSION=0.149.0
 
 ENV DEBIAN_FRONTEND=noninteractive
