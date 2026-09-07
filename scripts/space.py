@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+from concurrent.futures import ThreadPoolExecutor
 import datetime as dt
 import http.client
 import json
@@ -161,7 +162,7 @@ class Docker:
             remaining = min(deadlines) - time.monotonic()
             if remaining <= 0:
                 raise SpaceError("Docker inventory exceeded its 55-second budget; mutation disabled.")
-            connection.timeout = min(30, remaining)
+            connection.timeout = remaining
         url = (f"/v{self.version}" if self.version else "") + path
         if query:
             url += "?" + urlencode(query)
@@ -246,28 +247,37 @@ class Docker:
             self.deadline = None
 
     def _inventory(self):
-        images = self.api("GET", "/images/json", dict(all="true", manifests="true"))
-        containers = self.api("GET", "/containers/json", dict(all="true"))
-        inspected = []
-        for container in containers:
-            info = self.api("GET", f"/containers/{quote(container['Id'], safe='')}/json")
-            # Keep storage-reference metadata. Environment variables, command
-            # lines, and health logs are unrelated and must not enter receipts.
-            inspected.append({
-                "Id": info["Id"], "Name": info.get("Name"), "Image": info["Image"],
-                "ImageManifestDescriptor": info.get("ImageManifestDescriptor"),
-                "State": {key: info.get("State", {}).get(key) for key in
-                          ("Status", "Running", "Paused", "Restarting", "Dead", "StartedAt", "FinishedAt")},
-                "HostConfig": {"Mounts": [mount for mount in info.get("HostConfig", {}).get("Mounts", []) or []
-                                          if mount.get("Type") == "image"]},
-                "Mounts": [{key: mount.get(key) for key in ("Type", "Name", "Source", "Destination", "RW")}
-                           for mount in info.get("Mounts", [])],
-            })
-        disk = self.api("GET", "/system/df")
+        # These read-only requests are independent. Use the same deadline for
+        # every connection, including inspections queued after the container list.
+        # A complete observation still has no global Docker transaction; apply
+        # validates a fresh observation before each exact mutation.
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            images_future = pool.submit(self.api, "GET", "/images/json", dict(all="true", manifests="true"))
+            cache_future = pool.submit(self.api, "GET", "/system/df", dict(type="build-cache"))
+            containers = self.api("GET", "/containers/json", dict(all="true"))
+            inspections = [pool.submit(self.api, "GET", f"/containers/{quote(c['Id'], safe='')}/json")
+                           for c in containers]
+            images = images_future.result()
+            inspected = []
+            for future in inspections:
+                info = future.result()
+                # Keep storage-reference metadata. Environment variables, command
+                # lines, and health logs are unrelated and must not enter receipts.
+                inspected.append({
+                    "Id": info["Id"], "Name": info.get("Name"), "Image": info["Image"],
+                    "ImageManifestDescriptor": info.get("ImageManifestDescriptor"),
+                    "State": {key: info.get("State", {}).get(key) for key in
+                              ("Status", "Running", "Paused", "Restarting", "Dead", "StartedAt", "FinishedAt")},
+                    "HostConfig": {"Mounts": [mount for mount in info.get("HostConfig", {}).get("Mounts", []) or []
+                                              if mount.get("Type") == "image"]},
+                    "Mounts": [{key: mount.get(key) for key in ("Type", "Name", "Source", "Destination", "RW")}
+                               for mount in info.get("Mounts", [])],
+                })
+            disk = cache_future.result()
         if not isinstance(images, list) or not isinstance(inspected, list) or ("BuildCache" not in disk or (disk["BuildCache"] is not None and not isinstance(disk["BuildCache"], list))):
             raise SpaceError("Incomplete Docker inventory; mutation disabled.")
         return dict(images=images, containers=inspected, cache=disk["BuildCache"] or [],
-                    layers_size=disk.get("LayersSize"), binding=self.binding, measured_at=now())
+                    layers_size=None, binding=self.binding, measured_at=now())
 
     def delete_image(self, target):
         return self.api("DELETE", f"/images/{quote(target, safe='')}", dict(force="false", noprune="true"))
@@ -507,7 +517,7 @@ def print_report(report, action):
     plan = report["plan"]
     print("Docker Desktop storage — active image store and selected default builder")
     print("Image accounting and build-cache accounting overlap; neither is host free space.")
-    print(f"Docker image layer accounting: {report['inventory'].get('layers_size')} bytes (not a reclaim estimate)")
+    print("Docker image accounting uses each image's reported size below. Shared layer totals are unmeasured; do not add overlapping sizes.")
     if action == "cache":
         print(plan["note"])
     for family in plan.get("families", []):

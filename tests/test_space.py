@@ -9,8 +9,9 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 SPEC = importlib.util.spec_from_file_location("dclaude_space", Path(__file__).resolve().parents[1] / "scripts/space.py")
@@ -572,6 +573,74 @@ class DockerBoundaryTests(unittest.TestCase):
         with patch.object(self.docker, "api", side_effect=lambda method, path, query=None: responses[path]):
             with self.assertRaises(space.SpaceError):
                 self.docker.inventory()
+
+    def test_independent_inventory_probes_overlap_and_omit_global_disk_accounting(self):
+        # All three requests must start before any returns. This detects an
+        # accidental return to serial probes without a wall-clock speed guess.
+        started = threading.Barrier(3)
+        images = [image("a", "0.0.1", Descriptor=dict(mediaType="application/vnd.oci.image.index.v1+json"),
+                        Manifests=[dict(ID=ident("b"), Available=True, Kind="image")])]
+        def respond(method, path, query=None):
+            if path in ("/images/json", "/system/df", "/containers/json"):
+                started.wait(timeout=3)
+            if path == "/images/json":
+                self.assertEqual(query, dict(all="true", manifests="true"))
+                return images
+            if path == "/system/df":
+                self.assertEqual(query, dict(type="build-cache"))
+                return dict(BuildCache=[cache("private")])
+            if path == "/containers/json":
+                self.assertEqual(query, dict(all="true"))
+                return [dict(Id="stopped")]
+            if path == "/containers/stopped/json":
+                return dict(Id="stopped", Image=ident("b"), State=dict(Running=False))
+            raise AssertionError((method, path, query))
+        with patch.object(self.docker, "api", side_effect=respond):
+            result = self.docker.inventory()
+        self.assertEqual(result["images"][0]["Manifests"][0]["ID"], ident("b"))
+        self.assertEqual(result["containers"][0]["Image"], ident("b"))
+        self.assertEqual(result["cache"][0]["ID"], "private")
+        self.assertIsNone(result["layers_size"])
+
+
+class DockerDeadlineTests(unittest.TestCase):
+    def setUp(self):
+        self.docker = space.Docker()
+        self.docker.path = "/docker.sock"
+        self.connection = Mock()
+        self.connection.getresponse.return_value.status = 200
+        self.connection.getresponse.return_value.read.return_value = b"[]"
+
+    def test_api_uses_earliest_shared_deadline_and_allows_more_than_thirty_seconds(self):
+        for report, inventory_deadline, expected_timeout in ((155, 170, 55), (170, 145, 45), (120, 155, 20)):
+            with self.subTest(report=report, inventory=inventory_deadline):
+                self.docker.report_deadline = report
+                self.docker.deadline = inventory_deadline
+                with patch.object(space.time, "monotonic", return_value=100), \
+                        patch.object(space, "UnixConnection", return_value=self.connection):
+                    self.assertEqual(self.docker.api("GET", "/images/json"), [])
+                self.assertEqual(self.connection.timeout, expected_timeout)
+
+    def test_expired_report_or_inventory_budget_issues_no_request(self):
+        for report, inventory_deadline in ((99, 155), (155, 100)):
+            with self.subTest(report=report, inventory=inventory_deadline):
+                self.docker.report_deadline = report
+                self.docker.deadline = inventory_deadline
+                with patch.object(space.time, "monotonic", return_value=100), \
+                        patch.object(space, "UnixConnection", return_value=self.connection):
+                    with self.assertRaises(space.SpaceError):
+                        self.docker.api("GET", "/images/json")
+                self.connection.request.assert_not_called()
+
+    def test_slow_response_failure_is_not_retried_or_replaced_by_broader_probe(self):
+        self.docker.report_deadline = 155
+        self.connection.getresponse.side_effect = TimeoutError("read deadline")
+        with patch.object(space.time, "monotonic", return_value=100), \
+                patch.object(space, "UnixConnection", return_value=self.connection):
+            with self.assertRaises(space.SpaceError):
+                self.docker.api("GET", "/images/json", dict(all="true", manifests="true"))
+        self.connection.request.assert_called_once_with("GET", "/images/json?all=true&manifests=true")
+        self.connection.close.assert_called_once()
 
 
 class SpaceFixture(unittest.TestCase):

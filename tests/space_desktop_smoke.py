@@ -27,6 +27,18 @@ CURRENT = "dclaude:90.0.6"
 EVIDENCE = {}
 
 
+def save_evidence():
+    destination = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir())) / "space-desktop-evidence.json"
+    destination.write_text(json.dumps(EVIDENCE, indent=2, sort_keys=True) + "\n")
+    return destination
+
+
+def phase(message):
+    EVIDENCE.setdefault("phases", []).append({"message": message, "time": time.time()})
+    save_evidence()
+    print(f"Desktop proof: {message}", flush=True)
+
+
 def command(*args, timeout=180):
     result = subprocess.run(args, text=True, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, timeout=timeout)
@@ -177,6 +189,7 @@ def prove_exact_cache_selection(helper, report):
 
 def prove_incident_scale():
     """Time a real inventory with hundreds of unrelated immutable identities."""
+    phase("creating 280 unrelated images for the one-minute diagnosis test")
     tar_buffer = io.BytesIO()
     with tarfile.open(fileobj=tar_buffer, mode="w"):
         pass
@@ -193,8 +206,10 @@ def prove_incident_scale():
     with ThreadPoolExecutor(max_workers=4) as executor:
         imported_ids = set(executor.map(import_image, tags))
     assert len(imported_ids) == len(tags), "Fixture imports must have distinct image identities"
+    phase("280 unrelated images imported; creating 20 additional stopped containers")
     for index in range(20):
         command("docker", "create", "--name", f"space-proof-scale-{index:02d}", CURRENT, "/not-executed")
+    phase("timing complete inventory of more than 280 images and 21 stopped containers")
     report = diagnosis()
     actual_images = {image["Id"] for image in report["inventory"]["images"]}
     assert imported_ids <= actual_images, "The inventory omitted unrelated imported images"
@@ -245,24 +260,26 @@ def main():
     EVIDENCE["preflight_binding"] = engine.connect()
     EVIDENCE["preflight_host"] = helper.HostProbe().snapshot()
     assert EVIDENCE["preflight_host"]["complete"], EVIDENCE["preflight_host"]
+    phase("Desktop binding and APFS preflight passed; building cleanup fixtures")
     with tempfile.TemporaryDirectory(prefix="dclaude-space-fixture-") as temporary:
         context = Path(temporary)
         # An unnamed export creates a genuine labelled dangling reference even
         # on stores whose named export replaces old references immediately.
         dangling = make_image(context, "90.0.0", 2, tagged=False)
         rebuilt = make_image(context, "90.0.1", 128)
-        old_one = make_image(context, "90.0.1", 128)
-        old_two = make_image(context, "90.0.2", 128)
+        old_one = make_image(context, "90.0.1", 64)
+        old_two = make_image(context, "90.0.2", 64)
         command("docker", "tag", "dclaude:90.0.2", "dclaude:90.0.20")
-        stopped = make_image(context, "90.0.3", 64)
+        stopped = make_image(context, "90.0.3", 8)
         container_id = command("docker", "create", "--name", "space-proof-stopped",
                                "dclaude:90.0.3", "/not-executed").strip()
-        aliased = make_image(context, "90.0.4", 64)
+        aliased = make_image(context, "90.0.4", 8)
         command("docker", "tag", "dclaude:90.0.4", "another-project:preserve")
-        recent = make_image(context, "90.0.5", 64)
-        current = make_image(context, "90.0.6", 64)
+        recent = make_image(context, "90.0.5", 8)
+        current = make_image(context, "90.0.6", 8)
 
         EVIDENCE["raw_fixture_inventory"] = engine.inventory()
+        phase("cleanup fixtures built; verifying exact image candidates and protections")
         expected_candidates = {dangling, old_one, old_two}
         listed_ids = {image["Id"] for image in EVIDENCE["raw_fixture_inventory"]["images"]}
         if rebuilt in listed_ids:
@@ -314,6 +331,7 @@ def main():
         space("images", "--keep", "2", "--apply", confirm=True)
         image_receipt = latest_receipt()
         EVIDENCE["image_receipt"] = image_receipt
+        phase("image cleanup completed and receipt persisted")
         assert {candidate["id"] for candidate in image_receipt["reviewed"]} == candidates
         after_images = diagnosis()
         present = {image["Id"] for image in after_images["inventory"]["images"]}
@@ -330,9 +348,11 @@ def main():
         assert cache_preview["plan"]["protected"], "Fixture failed to retain shared cache beside targets"
         EVIDENCE["cache_preview_after_images"] = cache_preview
         prove_exact_cache_selection(helper, cache_preview)
+        phase("exact cache leaf selection and parent preservation passed; reviewing remaining cache")
         space("cache", "--apply", confirm=True)
         cache_receipt = latest_receipt()
         EVIDENCE["cache_receipt"] = cache_receipt
+        phase("cache cleanup completed and receipt persisted")
         assert cache_receipt["action"] == "cache"
         assert cache_receipt["started_at"] != image_receipt["started_at"]
         after_cache = diagnosis("cache")
@@ -363,8 +383,12 @@ def main():
         disabled = json.loads((state / "policy.json").read_text())
         assert disabled["enabled"] is False
         EVIDENCE["retention_policy_disabled"] = disabled
+        EVIDENCE["cleanup_checks_passed"] = True
+        phase("cleanup, protected objects, host recovery, verification, and retention checks passed")
+        print(json.dumps({"whole_cleanup_delta": delta}, indent=2), flush=True)
         prove_incident_scale()
         EVIDENCE["passed"] = True
+        phase("all Desktop checks passed, including incident-scale diagnosis")
         print(json.dumps({"passed": True, "whole_cleanup_delta": delta,
                           "exact_cache_selection": EVIDENCE["exact_cache_selection"]}, indent=2), flush=True)
 
@@ -373,6 +397,5 @@ if __name__ == "__main__":
     try:
         main()
     finally:
-        destination = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir())) / "space-desktop-evidence.json"
-        destination.write_text(json.dumps(EVIDENCE, indent=2, sort_keys=True) + "\n")
+        destination = save_evidence()
         print(f"Desktop integration evidence: {destination}", flush=True)

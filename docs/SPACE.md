@@ -266,21 +266,38 @@ proof that apply is supported.
 
 ## Validation scope
 
-Automated tests cover planning, protections, refused operations, wrapper dispatch,
-and receipt behavior with controlled fixtures. CI also exercises disk allocation
-and APFS probes on a real macOS runner. These checks do **not** establish Docker
-Desktop recovery on your Mac.
+CI combines controlled unit and wrapper tests with real macOS filesystem/APFS
+probes and a disposable Docker Desktop installation. The Desktop scenario creates
+its own images and cache records, checks protected images and containers, exercises
+cleanup and retention commands, and measures actual disk-image recovery. It also
+checks exact cache-ID selection while preserving the parent and every other cache
+record. Controlled tests cover refused operations, changing metadata, interrupted
+applies, and receipts.
 
-The following design experiments require a disposable Docker Desktop setup and
-remain **pending** until their actual results are recorded:
+The Desktop job records versions, measurements, and results in its
+`storage-desktop-validation` artifact. CI also asserts that diagnosis completes
+within 60 seconds on an incident-sized image inventory. Read the current workflow
+result and its artifact to assess the complete run.
 
-- Capture macOS, Desktop, Engine, and Buildx versions; active store; context;
-  builder; and a disk-image baseline matching Desktop's settings.
-- Reproduce image/cache overlap, prove exact cache selection beside another
-  project's records, and measure separate image/cache host recovery.
-- Exercise aliases, rebuilt tags, stopped containers, indexes/platforms,
-  retagging, denied paths, interrupted applies, and remote-context refusal.
-- Diagnose an incident-sized installation within 60 seconds and confirm a user
-  can understand its candidates, protections, uncertainty, and measured outcome.
-- Demonstrate material host recovery in the controlled fixture; a zero-recovery
-  receipt alone does not validate the design's recovery goal.
+### Recorded recovery on Docker Desktop
+
+[CI run 34161861303](https://github.com/stanislavkozlovski/dclaude/actions/runs/34161861303)
+used Docker Desktop **4.89.0**, Engine **29.7.2**, Buildx
+**0.36.1-desktop.1**, and macOS **15.7.9**, with the containerd image store.
+Its image and cache cleanup stages measured these separate results:
+
+| Cleanup stage | `Docker.raw` allocated-byte reduction | Observed APFS free-byte change |
+| --- | ---: | ---: |
+| Images | 270,204,928 | +268,877,824 |
+| Cache | 875,442,176 | +874,074,112 |
+
+Image/container preservation, exact single-cache-ID selection, metadata checks,
+and policy checks passed. The run subsequently failed its final 284-image
+inventory check at a 30-second request timeout. Overall validation is determined
+by current CI, including its diagnosis-time assertion.
+
+These measurements establish recovery on the disposable fixture. Your Mac's
+versions, warm containers, snapshots, concurrent writes, and accumulated history
+can produce a different result; use your own cleanup receipts to measure it.
+Usability review with the intended user and repeated-build dogfooding remain
+**pending**.
