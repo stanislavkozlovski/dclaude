@@ -85,8 +85,8 @@ Both `dclaude` and `dcodex` accept the following:
 | `--space retention status` | Show the saved image policy. |
 | `--space retention disable` | Stop future automatic cleanup; preserve history. |
 | `--keep N` | For image previews/applies or retention enable, retain the newest N distinct launcher builds; default 2, minimum 1. Protections can retain more. |
-| `--disk-image PATH` | Supply the Docker Desktop disk-image location for measurements. |
-| `--json` | Emit structured output with byte values and coverage gaps. |
+| `--disk-image PATH` | Supply the Docker Desktop disk-image location for image/cache commands or retention enable. `verify` uses the receipt's saved path. |
+| `--json` | Emit read-only structured output for image/cache previews, verify, or retention status. Rejects `--apply` and retention enable/disable. |
 | `--space --help` | Explain storage commands without requiring Docker. |
 
 `--apply` is only for image/cache deletion. It requires a terminal and explicit
@@ -257,7 +257,8 @@ receipt cannot be written. Resolve the reported problem and collect a new plan;
 do not bypass it by broadening a prune command.
 
 Mutation is supported only on macOS with one verified local Docker Desktop
-daemon, its active image store, and the default Buildx `docker`-driver builder.
+daemon exposing **Engine API 1.48 or newer**, its active image store, and the
+default Buildx `docker`-driver builder.
 Remote contexts, other VM products, custom builders, and Linux hosts receive
 coverage or unsupported-state guidance. Selecting a remote context must never
 clean another machine. Select the local Desktop context identified by the report

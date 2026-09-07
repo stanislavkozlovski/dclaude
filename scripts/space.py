@@ -523,6 +523,10 @@ def print_report(report, action):
     for family in plan.get("families", []):
         reason = "; ".join(family["reasons"]) or "eligible for explicit review"
         print(f"  {family['id']} {', '.join(family['tags']) or '(dangling)'}: {family['size_bytes']} bytes — {reason}")
+        age_days = max(0, time.time() - family["created"]) / 86400
+        print(f"    created {age_days:.1f} days ago (Unix time {family['created']})")
+    if action == "images":
+        print("Using a deleted build again requires rebuilding. Rebuild duration and storage growth are unmeasured; mutable dependencies may produce a different image.")
     print(f"Reviewed candidates: {len(plan['candidates'])}")
     for candidate in plan["candidates"]:
         print(f"  {candidate['id']} {candidate.get('targets', '')}: {candidate['size_bytes']} bytes")
@@ -751,7 +755,8 @@ def parser():
   retention status       Show the saved policy and native GC guidance.
   retention disable      Stop automatic image cleanup; retain all history.
 
-Requires host Python 3 and local macOS Docker Desktop for storage operations.
+Requires host Python 3 and local macOS Docker Desktop with Engine API 1.48+
+for storage operations.
 Runs before repository lookup, builds, updates, or agent startup. Ordinary
 launches need no new Python installation. --apply requires a terminal; --yes
 only authorizes launcher updates. Other Docker clients must be idle.
@@ -847,6 +852,9 @@ def main(argv=None):
                               binding=docker.binding, disk_image=baseline["disk_image"]["path"], updated_at=now())
                 write_json(directory / "policy.json", policy)
             print("Retention enabled for labelled default dclaude builds after successful build and bootstrap. It never prunes cache or legacy unlabelled images.")
+            print(f"Keep the newest {policy['keep']} distinct builds, plus the current image, all container references, and non-release or other-repository aliases.")
+            print(f"Bound to context {docker.binding['context']}, builder {docker.binding['builder']}, daemon {docker.binding['daemon_id']} (store {docker.binding['driver']}).")
+            print(f"Disk image: {policy['disk_image']}")
             print(GC_GUIDANCE)
             return 0
         if args.auto_retain:
