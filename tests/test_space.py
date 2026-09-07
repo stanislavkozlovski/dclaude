@@ -382,8 +382,9 @@ class DockerBoundaryTests(unittest.TestCase):
         self.endpoint = "unix://" + str(Path.home() / ".docker/run/docker.sock")
         self.version = "1.49"
         self.info = dict(ID="desktop-engine", OperatingSystem="Docker Desktop", OSType="linux", Driver="overlayfs")
+        self.context_endpoints = {}
         self.builder = dict(Name="desktop-linux", Driver="docker",
-                            Nodes=[dict(Status="running", IDs=["desktop-engine"])])
+                            Nodes=[dict(Status="running", Endpoint="desktop-linux", IDs=["desktop-worker"])])
         self.envelope = dict(Current=True, Builder=self.builder)
         self.docker = space.Docker(runner=self.runner)
         self.api_patch = patch.object(self.docker, "api", side_effect=self.api)
@@ -402,7 +403,8 @@ class DockerBoundaryTests(unittest.TestCase):
         if args[:3] == ["docker", "context", "show"]:
             return self.context.encode()
         if args[:3] == ["docker", "context", "inspect"]:
-            return json.dumps([dict(Endpoints=dict(docker=dict(Host=self.endpoint)))]).encode()
+            endpoint = self.endpoint if args[3] == self.context else self.context_endpoints[args[3]]
+            return json.dumps([dict(Endpoints=dict(docker=dict(Host=endpoint)))]).encode()
         if args[:3] == ["docker", "buildx", "ls"]:
             return json.dumps(self.envelope).encode()
         raise AssertionError(args)
@@ -419,6 +421,25 @@ class DockerBoundaryTests(unittest.TestCase):
         self.assertEqual(result["daemon_id"], "desktop-engine")
         self.assertEqual(result["context"], "desktop-linux")
         self.assertEqual(result["endpoint"], self.endpoint)
+        self.assertEqual(result["worker_ids"], ["desktop-worker"])
+
+    def test_default_named_builder_requires_one_running_node_on_selected_desktop_engine(self):
+        self.builder["Name"] = "default"
+        binding = self.docker.connect()
+        self.assertEqual(binding["context"], "desktop-linux")
+        self.assertEqual(binding["builder"], "default")
+        self.assertEqual(binding["daemon_id"], "desktop-engine")
+        invalid_nodes = (
+            [dict(Status="running", Endpoint="unix:///other.sock", IDs=["desktop-engine"])],
+            [dict(Status="stopped", Endpoint="desktop-linux", IDs=["desktop-worker"])],
+            [dict(Status="running", Endpoint="desktop-linux", IDs=["desktop-worker"]),
+             dict(Status="running", Endpoint="desktop-linux", IDs=["desktop-worker"])],
+        )
+        for nodes in invalid_nodes:
+            with self.subTest(nodes=nodes):
+                self.builder["Nodes"] = nodes
+                with self.assertRaises(space.SpaceError):
+                    self.docker.connect()
 
     def test_tcp_ssh_and_forwarded_unix_sockets_are_refused(self):
         for endpoint in ("tcp://remote:2375", "ssh://server", "unix:///tmp/forwarded.sock"):
@@ -428,13 +449,51 @@ class DockerBoundaryTests(unittest.TestCase):
                     self.docker.connect()
 
     def test_other_builder_driver_or_daemon_is_refused(self):
-        for key, value in (("Driver", "docker-container"), ("Name", "other-context"), ("Nodes", [dict(Status="running", IDs=["other-engine"])])):
+        for key, value in (("Driver", "docker-container"), ("Name", "other-context"),
+                           ("Nodes", [dict(Status="running", Endpoint="unix:///other.sock", IDs=["desktop-engine"])])):
             with self.subTest(key=key):
                 old = self.builder[key]
                 self.builder[key] = value
                 with self.assertRaises(space.SpaceError):
                     self.docker.connect()
                 self.builder[key] = old
+
+    def test_worker_id_can_differ_only_when_node_endpoint_proves_same_desktop_socket(self):
+        self.context_endpoints["default"] = self.endpoint
+        for endpoint in ("default", self.endpoint):
+            with self.subTest(endpoint=endpoint):
+                self.builder["Nodes"][0]["Endpoint"] = endpoint
+                binding = self.docker.connect()
+                self.assertEqual(binding["daemon_id"], "desktop-engine")
+                self.assertEqual(binding["worker_ids"], ["desktop-worker"])
+                self.assertEqual(binding["builder_endpoint"], self.endpoint)
+
+    def test_wrong_remote_or_missing_node_endpoint_refused_even_if_worker_matches_daemon(self):
+        node = self.builder["Nodes"][0]
+        node["IDs"] = ["desktop-engine"]
+        self.context_endpoints["remote-context"] = "tcp://other:2375"
+        self.context_endpoints["other-context"] = "unix:///other.sock"
+        for endpoint in ("unix:///other.sock", "tcp://other:2375", "ssh://other", "remote-context", "other-context", None, ""):
+            with self.subTest(endpoint=endpoint):
+                node["Endpoint"] = endpoint
+                with self.assertRaises(space.SpaceError):
+                    self.docker.connect()
+        del node["Endpoint"]
+        with self.assertRaises(space.SpaceError):
+            self.docker.connect()
+
+    def test_daemon_change_during_builder_endpoint_binding_is_refused(self):
+        info_calls = 0
+        def change_daemon(method, path, query=None):
+            nonlocal info_calls
+            if path == "/info":
+                info_calls += 1
+                return dict(self.info, ID="desktop-engine" if info_calls == 1 else "replacement-engine")
+            return self.api(method, path, query)
+        with patch.object(self.docker, "api", side_effect=change_daemon):
+            with self.assertRaisesRegex(space.SpaceError, "identity changed"):
+                self.docker.connect()
+        self.assertEqual(info_calls, 2)
 
     def test_no_selected_builder_and_stopped_builder_are_refused(self):
         self.envelope["Current"] = False

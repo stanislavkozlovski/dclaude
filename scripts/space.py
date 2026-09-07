@@ -192,6 +192,7 @@ class Docker:
         desktop_socket = Path.home() / ".docker/run/docker.sock"
         if Path(self.path).resolve() != desktop_socket.resolve():
             raise SpaceError("Socket is not the local Docker Desktop socket (~/.docker/run/docker.sock); forwarded or unknown Unix endpoints are unsupported.")
+        self.path = str(Path(self.path).resolve())
         version = self.api("GET", "/version")
         parts = tuple(int(p) for p in version["ApiVersion"].split("."))
         if parts < (1, 48):
@@ -209,12 +210,32 @@ class Docker:
             raise SpaceError("Select the default docker-driver builder; other builders are outside this cleanup scope.")
         builder = selected[0]
         nodes = builder.get("Nodes", [])
-        if (builder.get("Name") != context or len(nodes) != 1 or nodes[0].get("Status") != "running"
-                or info["ID"] not in nodes[0].get("IDs", [])):
-            raise SpaceError("Cannot prove that the selected builder belongs to this Docker Desktop engine.")
-        self.binding = dict(context=context, endpoint=endpoint, daemon_id=info["ID"],
-                            builder=builder["Name"], driver=info.get("Driver"),
-                            driver_status=info.get("DriverStatus"))
+        if (builder.get("Name") not in (context, "default") or len(nodes) != 1
+                or nodes[0].get("Status") != "running"):
+            raise SpaceError("The selected builder must be the single running default docker-driver node.")
+        node = nodes[0]
+        endpoint_ref = node.get("Endpoint")
+        if not isinstance(endpoint_ref, str) or not endpoint_ref:
+            raise SpaceError("Builder node endpoint is unmeasured; cleanup disabled.")
+        if "://" in endpoint_ref:
+            node_endpoint = endpoint_ref
+        else:
+            node_context = json.loads(self.runner(["docker", "context", "inspect", endpoint_ref]))
+            node_endpoint = node_context[0]["Endpoints"]["docker"]["Host"]
+        if not node_endpoint.startswith("unix://") or str(Path(node_endpoint[7:]).resolve()) != self.path:
+            raise SpaceError("The selected builder endpoint is not the pinned local Docker Desktop socket.")
+        # The docker driver dials BuildKit through this daemon's /grpc API.
+        # Containerd worker IDs are independent of Engine /info.ID, so compare
+        # the daemon over the proven same socket and retain worker IDs separately.
+        node_info = self.api("GET", "/info")
+        if not info.get("ID") or node_info.get("ID") != info["ID"]:
+            raise SpaceError("Docker daemon identity changed while binding its default builder.")
+        workers = node.get("IDs")
+        if not isinstance(workers, list) or not workers or any(not isinstance(w, str) or not w for w in workers):
+            raise SpaceError("Builder worker identities are unmeasured; cleanup disabled.")
+        self.binding = dict(context=context, endpoint=endpoint, socket=self.path, daemon_id=info["ID"],
+                            builder=builder["Name"], builder_endpoint=node_endpoint, worker_ids=sorted(workers),
+                            driver=info.get("Driver"), driver_status=info.get("DriverStatus"))
         return self.binding
 
     def inventory(self):

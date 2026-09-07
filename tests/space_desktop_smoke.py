@@ -83,6 +83,9 @@ def diagnosis(action="images"):
     started = time.monotonic()
     report = json.loads(space(action, "--json"))
     duration = time.monotonic() - started
+    EVIDENCE.setdefault("diagnosis_reports", []).append({
+        "action": action, "seconds": duration, "report": report,
+    })
     assert "error" not in report, report
     assert duration < 60, f"Diagnosis exceeded one minute: {duration:.2f}s"
     assert report["host"]["complete"], report["host"]
@@ -220,7 +223,23 @@ def main():
         "buildx": command("docker", "buildx", "version"),
         "desktop": command("defaults", "read", "/Applications/Docker.app/Contents/Info", "CFBundleShortVersionString"),
     }
+    selected_context = command("docker", "context", "show").strip()
+    raw_info = json.loads(command("docker", "info", "--format", "{{json .}}"))
+    EVIDENCE["connection_diagnostics"] = {
+        "context": selected_context,
+        "contexts": json.loads(command("docker", "context", "inspect", selected_context, "default")),
+        "builders_json": command("docker", "buildx", "ls", "--format", "{{json .}}"),
+        "builders_selection": command("docker", "buildx", "ls", "--format",
+                                      '{"Current":{{json .Builder.Current}},"Builder":{{json .Builder}}}'),
+        "engine": {key: raw_info.get(key) for key in (
+            "ID", "Name", "OperatingSystem", "OSType", "ServerVersion", "Driver", "DriverStatus")},
+    }
+    print(json.dumps({"connection_diagnostics": EVIDENCE["connection_diagnostics"]}, indent=2), flush=True)
     helper = load_helper()
+    engine = helper.Docker()
+    EVIDENCE["preflight_binding"] = engine.connect()
+    EVIDENCE["preflight_host"] = helper.HostProbe().snapshot()
+    assert EVIDENCE["preflight_host"]["complete"], EVIDENCE["preflight_host"]
     with tempfile.TemporaryDirectory(prefix="dclaude-space-fixture-") as temporary:
         context = Path(temporary)
         # Old labelled dangling output from rebuilding exactly the same tag.
@@ -236,6 +255,7 @@ def main():
         recent = make_image(context, "90.0.5", 64)
         current = make_image(context, "90.0.6", 64)
 
+        EVIDENCE["raw_fixture_inventory"] = engine.inventory()
         initial = diagnosis()
         candidates = {candidate["id"] for candidate in initial["plan"]["candidates"]}
         assert candidates == {dangling, old_one, old_two}, initial["plan"]
