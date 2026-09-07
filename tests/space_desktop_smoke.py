@@ -106,7 +106,7 @@ def latest_receipt():
     return receipt
 
 
-def make_image(context, release, size_mib, *, labelled=True):
+def make_image(context, release, size_mib, *, labelled=True, tagged=True):
     # Fresh, incompressible bytes ensure real reclaimable blocks, not a sparse
     # zero fixture that passes Docker accounting while occupying little APFS.
     for filename in ("payload-a", "payload-b"):
@@ -116,16 +116,21 @@ def make_image(context, release, size_mib, *, labelled=True):
     (context / "Dockerfile").write_text(
         "FROM scratch\nCOPY payload-a /payload-a\nCOPY payload-b /payload-b\n")
     tag = "dclaude:" + release
-    argv = ["docker", "build", "--no-cache", "-t", tag]
+    argv = ["docker", "build", "--no-cache"]
+    iid_file = context / "untagged-image-id"
+    if tagged:
+        argv.extend(["-t", tag])
+    else:
+        argv.extend(["--iidfile", str(iid_file)])
     if labelled:
         argv.extend(["--label", "com.dclaude.managed=true",
                      "--label", "com.dclaude.release=" + release])
     argv.append(str(context))
     output = command(*argv, timeout=300)
-    print(f"Built {tag}: {size_mib} MiB\n{output[-500:]}", flush=True)
+    print(f"Built {tag if tagged else 'labelled image without a tag'}: {size_mib} MiB\n{output[-500:]}", flush=True)
     # Docker's list API uses seconds; avoid ambiguous creation-order fixtures.
     time.sleep(1.1)
-    return image_id(tag)
+    return image_id(tag if tagged else iid_file.read_text().strip())
 
 
 def load_helper():
@@ -242,8 +247,10 @@ def main():
     assert EVIDENCE["preflight_host"]["complete"], EVIDENCE["preflight_host"]
     with tempfile.TemporaryDirectory(prefix="dclaude-space-fixture-") as temporary:
         context = Path(temporary)
-        # Old labelled dangling output from rebuilding exactly the same tag.
-        dangling = make_image(context, "90.0.1", 128)
+        # An unnamed export creates a genuine labelled dangling reference even
+        # on stores whose named export replaces old references immediately.
+        dangling = make_image(context, "90.0.0", 2, tagged=False)
+        rebuilt = make_image(context, "90.0.1", 128)
         old_one = make_image(context, "90.0.1", 128)
         old_two = make_image(context, "90.0.2", 128)
         command("docker", "tag", "dclaude:90.0.2", "dclaude:90.0.20")
@@ -256,9 +263,31 @@ def main():
         current = make_image(context, "90.0.6", 64)
 
         EVIDENCE["raw_fixture_inventory"] = engine.inventory()
+        expected_candidates = {dangling, old_one, old_two}
+        listed_ids = {image["Id"] for image in EVIDENCE["raw_fixture_inventory"]["images"]}
+        if rebuilt in listed_ids:
+            expected_candidates.add(rebuilt)
+            EVIDENCE["rebuilt_tag_disposition"] = {"id": rebuilt, "disposition": "retained_as_dangling_image"}
+        else:
+            # A missing row alone does not prove absence: inspect must also
+            # report 404, or this is an inventory bug and the test must fail.
+            probe = helper.UnixConnection(engine.path)
+            try:
+                probe.request("GET", f"/v{engine.version}/images/{rebuilt}/json")
+                response = probe.getresponse()
+                body = response.read().decode(errors="replace")
+                EVIDENCE["rebuilt_tag_disposition"] = {
+                    "id": rebuilt, "disposition": "engine_already_retired_reference",
+                    "inspect_http_status": response.status, "inspect_response": body,
+                }
+                assert response.status == 404, EVIDENCE["rebuilt_tag_disposition"]
+            finally:
+                probe.close()
         initial = diagnosis()
         candidates = {candidate["id"] for candidate in initial["plan"]["candidates"]}
-        assert candidates == {dangling, old_one, old_two}, initial["plan"]
+        assert candidates == expected_candidates, initial["plan"]
+        dangling_candidate = next(candidate for candidate in initial["plan"]["candidates"] if candidate["id"] == dangling)
+        assert dangling_candidate["targets"] == [dangling] and not dangling_candidate["legacy"], dangling_candidate
         alias_candidate = next(candidate for candidate in initial["plan"]["candidates"] if candidate["id"] == old_two)
         assert set(alias_candidate["targets"]) == {"dclaude:90.0.2", "dclaude:90.0.20"}
         assert initial["host"]["disk_image"]["allocated_bytes"] >= 256 * MIB
