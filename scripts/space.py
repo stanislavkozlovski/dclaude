@@ -227,7 +227,21 @@ class Docker:
     def _inventory(self):
         images = self.api("GET", "/images/json", dict(all="true", manifests="true"))
         containers = self.api("GET", "/containers/json", dict(all="true"))
-        inspected = [self.api("GET", f"/containers/{quote(c['Id'], safe='')}/json") for c in containers]
+        inspected = []
+        for container in containers:
+            info = self.api("GET", f"/containers/{quote(container['Id'], safe='')}/json")
+            # Keep storage-reference metadata. Environment variables, command
+            # lines, and health logs are unrelated and must not enter receipts.
+            inspected.append({
+                "Id": info["Id"], "Name": info.get("Name"), "Image": info["Image"],
+                "ImageManifestDescriptor": info.get("ImageManifestDescriptor"),
+                "State": {key: info.get("State", {}).get(key) for key in
+                          ("Status", "Running", "Paused", "Restarting", "Dead", "StartedAt", "FinishedAt")},
+                "HostConfig": {"Mounts": [mount for mount in info.get("HostConfig", {}).get("Mounts", []) or []
+                                          if mount.get("Type") == "image"]},
+                "Mounts": [{key: mount.get(key) for key in ("Type", "Name", "Source", "Destination", "RW")}
+                           for mount in info.get("Mounts", [])],
+            })
         disk = self.api("GET", "/system/df")
         if not isinstance(images, list) or not isinstance(inspected, list) or ("BuildCache" not in disk or (disk["BuildCache"] is not None and not isinstance(disk["BuildCache"], list))):
             raise SpaceError("Incomplete Docker inventory; mutation disabled.")
@@ -512,8 +526,17 @@ def confirm(action, count):
         raise SpaceError("Cancelled; nothing deleted.")
 
 
+def canonical(value):
+    """Inventory arrays describe sets of records/edges, not execution order."""
+    if isinstance(value, dict):
+        return {key: canonical(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return sorted((canonical(item) for item in value), key=lambda item: json.dumps(item, sort_keys=True))
+    return value
+
+
 def same_selection(left, right):
-    return json.dumps(left, sort_keys=True) == json.dumps(right, sort_keys=True)
+    return json.dumps(canonical(left), sort_keys=True) == json.dumps(canonical(right), sort_keys=True)
 
 
 def validate_latest(directory):
@@ -529,7 +552,7 @@ def validate_latest(directory):
 
 
 def inventory_signature(inventory):
-    return json.dumps({key: inventory[key] for key in ("images", "containers", "cache")}, sort_keys=True)
+    return json.dumps(canonical({key: inventory[key] for key in ("images", "containers", "cache")}), sort_keys=True)
 
 
 def validate_automatic(docker, args, directory):

@@ -58,6 +58,15 @@ def arguments(**extra):
     return argparse.Namespace(**result)
 
 
+def reverse_inventory_lists(value):
+    """Model Docker returning the same sets in a different enumeration order."""
+    if isinstance(value, list):
+        return [reverse_inventory_lists(item) for item in reversed(value)]
+    if isinstance(value, dict):
+        return {key: reverse_inventory_lists(item) for key, item in value.items()}
+    return value
+
+
 class FakeDocker:
     def __init__(self, contents=None):
         self.contents = contents or inventory()
@@ -265,6 +274,38 @@ class CachePlanningTests(unittest.TestCase):
         self.assertEqual(api.call_args.args, ("DELETE", "/images/dclaude%3A0.0.1", dict(force="false", noprune="true")))
 
 
+class InventoryComparisonTests(unittest.TestCase):
+    def setUp(self):
+        manifests = [dict(ID=ident("b"), Available=True, Kind="image"),
+                     dict(ID=ident("c"), Available=True, Kind="attestation", AttestationData=dict(For=ident("b")))]
+        old = image("a", "0.0.1", Manifests=manifests)
+        old["RepoTags"].append("dclaude:0.0.2")
+        old["RepoDigests"] = ["dclaude@" + ident("b"), "dclaude@" + ident("c")]
+        mounts = [dict(Type="bind", Source="/repo"), dict(Type="image", Source="dclaude@" + ident("f"))]
+        containers = [dict(Id="one", Image=ident("f"), HostConfig=dict(Mounts=mounts), Mounts=copy.deepcopy(mounts)),
+                      dict(Id="two", Image=ident("f"))]
+        self.contents = inventory([old, image("f", "0.0.9", created=9)], containers,
+                                  [cache("child", Parents=["parent1", "parent2"]), cache("parent1"), cache("parent2")])
+
+    def test_docker_enumeration_order_does_not_change_inventory_identity(self):
+        reordered = reverse_inventory_lists(self.contents)
+        self.assertEqual(space.inventory_signature(self.contents), space.inventory_signature(reordered))
+
+    def test_real_reference_or_eligibility_mutations_still_change_identity(self):
+        mutations = (
+            lambda value: value["containers"][0].update(Image=ident("a")),
+            lambda value: value["containers"][0]["HostConfig"]["Mounts"][1].update(Source="dclaude@" + ident("a")),
+            lambda value: value["images"][0]["RepoTags"].append("other:project"),
+            lambda value: value["images"][0]["Manifests"][0].update(ID=ident("d")),
+            lambda value: value["cache"][0]["Parents"].append("parent3"),
+            lambda value: value["cache"][0].update(Shared=True),
+        )
+        for mutate in mutations:
+            changed = reverse_inventory_lists(reverse_inventory_lists(self.contents))
+            mutate(changed)
+            self.assertNotEqual(space.inventory_signature(self.contents), space.inventory_signature(changed))
+
+
 class MeasurementTests(unittest.TestCase):
     def test_signed_host_counters_are_separate_from_disk_allocation(self):
         result = space.host_delta(measurement(100, 1000), measurement(90, 800))
@@ -429,7 +470,7 @@ class DockerBoundaryTests(unittest.TestCase):
     def test_inventory_includes_stopped_containers_and_inspects_references(self):
         responses = {
             "/images/json": [], "/containers/json": [dict(Id="stopped-container")],
-            "/containers/stopped-container/json": dict(Image=ident("a"), State=dict(Running=False)),
+            "/containers/stopped-container/json": dict(Id="stopped-container", Image=ident("a"), State=dict(Running=False)),
             "/system/df": dict(BuildCache=None, LayersSize=0),
         }
         with patch.object(self.docker, "api", side_effect=lambda method, path, query=None: responses[path]) as api:
@@ -438,6 +479,34 @@ class DockerBoundaryTests(unittest.TestCase):
         self.assertEqual(result["cache"], [])
         api.assert_any_call("GET", "/containers/json", dict(all="true"))
         api.assert_any_call("GET", "/images/json", dict(all="true", manifests="true"))
+
+    def test_container_inventory_omits_environment_secrets_and_preserves_image_references(self):
+        source = dict(
+            Id="container-one", Image=ident("a"),
+            ImageManifestDescriptor=dict(digest=ident("b")),
+            Config=dict(Env=["PRIVATE_TOKEN=do-not-store-this"], Cmd=["private-command"]),
+            HostConfig=dict(Mounts=[dict(Type="image", Source="dclaude@" + ident("c"), Target="/image-mount")],
+                            Binds=["/private/host:/private/container"], RestartPolicy=dict(Name="always")),
+            Mounts=[dict(Type="image", Source="dclaude@" + ident("c"), Destination="/image-mount")],
+            State=dict(Running=False), NetworkSettings=dict(IPAddress="10.1.2.3"),
+        )
+        responses = {"/images/json": [], "/containers/json": [dict(Id="container-one")],
+                     "/containers/container-one/json": source, "/system/df": dict(BuildCache=[], LayersSize=0)}
+        with patch.object(self.docker, "api", side_effect=lambda method, path, query=None: responses[path]):
+            result = self.docker.inventory()
+        serialized = json.dumps(result)
+        self.assertNotIn("PRIVATE_TOKEN", serialized)
+        self.assertNotIn("do-not-store-this", serialized)
+        self.assertNotIn("private-command", serialized)
+        observed = result["containers"][0]
+        self.assertNotIn("Config", observed)
+        self.assertNotIn("NetworkSettings", observed)
+        self.assertNotIn("Binds", observed["HostConfig"])
+        self.assertEqual(observed["Id"], "container-one")
+        self.assertEqual(observed["Image"], ident("a"))
+        self.assertEqual(observed["ImageManifestDescriptor"]["digest"], ident("b"))
+        self.assertEqual(observed["HostConfig"]["Mounts"][0]["Source"], "dclaude@" + ident("c"))
+        self.assertEqual(observed["Mounts"][0]["Type"], "image")
 
     def test_missing_cache_inventory_fails_closed(self):
         responses = {"/images/json": [], "/containers/json": [], "/system/df": dict(LayersSize=0)}
@@ -610,6 +679,44 @@ class StateAndApplyTests(SpaceFixture):
 
     def test_unrelated_inventory_change_aborts_before_first_delete(self):
         self.docker.inventory_hooks[2] = lambda d: d.contents["images"].append(image("b", RepoTags=["other:project"]))
+        with self.assertRaises(space.SpaceError):
+            self.apply()
+        self.assertEqual(self.docker.deleted, [])
+
+    def test_reordered_images_tags_manifests_and_container_mounts_allow_reviewed_cleanup(self):
+        self.docker.contents["images"][0]["RepoTags"].append("dclaude:0.0.2")
+        self.docker.contents["images"][0]["Manifests"] = [
+            dict(ID=ident("b"), Available=True, Kind="image"),
+            dict(ID=ident("c"), Available=True, Kind="attestation", AttestationData=dict(For=ident("b"))),
+        ]
+        mounts = [dict(Type="bind", Source="/repo"), dict(Type="volume", Source="auth")]
+        self.docker.contents["containers"] = [
+            dict(Id="first", Image=ident("f"), HostConfig=dict(Mounts=mounts), Mounts=copy.deepcopy(mounts)),
+            dict(Id="second", Image=ident("f")),
+        ]
+        self.docker.contents["cache"] = [cache("cache-a"), cache("cache-b")]
+        self.docker.inventory_hooks[2] = lambda docker: setattr(docker, "contents", reverse_inventory_lists(docker.contents))
+        result = self.apply()
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(self.docker.deleted, ["dclaude:0.0.1", "dclaude:0.0.2"])
+
+    def test_reordered_cache_parent_relationships_allow_only_reviewed_cache_cleanup(self):
+        self.args.action = "cache"
+        self.docker.contents["cache"] = [cache("child", Parents=["parent-a", "parent-b"]),
+                                         cache("parent-a", Shared=True), cache("parent-b", Shared=True)]
+        self.docker.inventory_hooks[2] = lambda docker: setattr(docker, "contents", reverse_inventory_lists(docker.contents))
+        result = self.apply()
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(self.docker.deleted, ["child"])
+
+    def test_reordered_cache_with_changed_parent_reference_still_stops_before_delete(self):
+        self.args.action = "cache"
+        self.docker.contents["cache"] = [cache("child", Parents=["parent-a", "parent-b"]),
+                                         cache("parent-a", Shared=True), cache("parent-b", Shared=True)]
+        def change_reference(docker):
+            docker.contents = reverse_inventory_lists(docker.contents)
+            next(record for record in docker.contents["cache"] if record["ID"] == "child")["Parents"].append("new-parent")
+        self.docker.inventory_hooks[2] = change_reference
         with self.assertRaises(space.SpaceError):
             self.apply()
         self.assertEqual(self.docker.deleted, [])
