@@ -190,8 +190,8 @@ class ImagePlanningTests(unittest.TestCase):
 
     def test_platform_and_attestation_references_protect_the_index(self):
         for manifest in (
-            dict(ID=ident("b"), ImageData=dict(Containers=["stopped"])),
-            dict(ID=ident("c"), AttestationData=dict(For=ident("b"))),
+            dict(ID=ident("b"), Available=True, Kind="image", ImageData=dict(Containers=["stopped"])),
+            dict(ID=ident("c"), Available=True, Kind="attestation", AttestationData=dict(For=ident("b"))),
         ):
             with self.subTest(manifest=manifest):
                 contents = inventory(containers=[dict(Image=ident("b"))])
@@ -199,7 +199,7 @@ class ImagePlanningTests(unittest.TestCase):
                 self.assertEqual(self.plan(contents)["candidates"], [])
 
     def test_overlapping_family_roots_cannot_bypass_alias_protection(self):
-        contents = inventory([image("a", "0.0.1", Manifests=[dict(ID=ident("b"))]),
+        contents = inventory([image("a", "0.0.1", Manifests=[dict(ID=ident("b"), Available=True, Kind="image")]),
                               image("b", "0.0.2", RepoTags=["personal:keep"]), image("f", "0.0.9", created=9)])
         self.assertEqual(self.plan(contents)["candidates"], [])
 
@@ -294,6 +294,156 @@ class MeasurementTests(unittest.TestCase):
         after["containers"][1]["free_bytes"] += 100
         result = space.host_delta(before, after)
         self.assertEqual([c["free_bytes_delta"] for c in result["apfs"]], [0, 100])
+
+    def host_probe(self, denied=False, external=False):
+        startup = dict(APFSContainerUUID="startup", ContainerReference="disk3", CapacityCeiling=1000,
+                       CapacityFree=100, Volumes=[dict(DeviceIdentifier="disk3s1")])
+        external_disk = dict(APFSContainerUUID="external", ContainerReference="disk8", CapacityCeiling=2000,
+                             CapacityFree=200, Volumes=[dict(DeviceIdentifier="disk8s1")])
+        probe = space.HostProbe()
+        def plist(args):
+            if args[0] == "apfs":
+                return dict(Containers=[startup, external_disk] if external else [startup])
+            if args[-1] == "/Volumes/External":
+                return dict(APFSContainerReference="disk8")
+            return dict(APFSContainerReference="disk3")
+        raw = measurement()["disk_image"]
+        raw["path"] = "/Volumes/External/Docker.raw" if external else "/Docker.raw"
+        with patch.object(space.platform, "system", return_value="Darwin"), patch.object(probe, "plist", side_effect=plist), \
+                patch.object(space, "measure_file", side_effect=PermissionError("privacy denied") if denied else None, return_value=raw), \
+                patch.object(space.os.path, "ismount", side_effect=lambda p: str(p) in ("/", "/Volumes/External")):
+            return probe.snapshot(Path(raw["path"]))
+
+    def test_same_apfs_container_is_counted_once_with_both_roles(self):
+        result = self.host_probe()
+        self.assertTrue(result["complete"])
+        self.assertEqual(len(result["containers"]), 1)
+        self.assertEqual(result["containers"][0]["roles"], ["startup", "docker"])
+        self.assertEqual(result["containers"][0]["free_bytes"], 100)
+
+    def test_external_raw_keeps_separate_apfs_containers(self):
+        result = self.host_probe(external=True)
+        self.assertTrue(result["complete"])
+        self.assertEqual([c["roles"] for c in result["containers"]], [["startup"], ["docker"]])
+
+    def test_denied_disk_image_is_unmeasured_but_startup_counter_survives(self):
+        result = self.host_probe(denied=True)
+        self.assertFalse(result["complete"])
+        self.assertIsNone(result["disk_image"])
+        self.assertEqual(result["containers"][0]["free_bytes"], 100)
+        self.assertEqual(result["issues"][0]["path"], "/Docker.raw")
+        self.assertIn("privacy denied", result["issues"][0]["message"])
+
+
+class DockerBoundaryTests(unittest.TestCase):
+    def setUp(self):
+        self.context = "desktop-linux"
+        self.endpoint = "unix://" + str(Path.home() / ".docker/run/docker.sock")
+        self.version = "1.49"
+        self.info = dict(ID="desktop-engine", OperatingSystem="Docker Desktop", OSType="linux", Driver="overlayfs")
+        self.builder = dict(Name="desktop-linux", Driver="docker",
+                            Nodes=[dict(Status="running", IDs=["desktop-engine"])])
+        self.envelope = dict(Current=True, Builder=self.builder)
+        self.docker = space.Docker(runner=self.runner)
+        self.api_patch = patch.object(self.docker, "api", side_effect=self.api)
+        self.api_patch.start()
+        self.addCleanup(self.api_patch.stop)
+        self.platform_patch = patch.object(space.platform, "system", return_value="Darwin")
+        self.platform_patch.start()
+        self.addCleanup(self.platform_patch.stop)
+        self.env_patch = patch.dict(os.environ)
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
+        for key in ("DOCKER_HOST", "DOCKER_CONTEXT", "BUILDX_BUILDER", "DOCKER_BUILDKIT"):
+            os.environ.pop(key, None)
+
+    def runner(self, args):
+        if args[:3] == ["docker", "context", "show"]:
+            return self.context.encode()
+        if args[:3] == ["docker", "context", "inspect"]:
+            return json.dumps([dict(Endpoints=dict(docker=dict(Host=self.endpoint)))]).encode()
+        if args[:3] == ["docker", "buildx", "ls"]:
+            return json.dumps(self.envelope).encode()
+        raise AssertionError(args)
+
+    def api(self, method, path, query=None):
+        if path == "/version":
+            return dict(ApiVersion=self.version)
+        if path == "/info":
+            return self.info
+        raise AssertionError((method, path, query))
+
+    def test_local_desktop_binding_requires_selected_builder_same_engine(self):
+        result = self.docker.connect()
+        self.assertEqual(result["daemon_id"], "desktop-engine")
+        self.assertEqual(result["context"], "desktop-linux")
+        self.assertEqual(result["endpoint"], self.endpoint)
+
+    def test_tcp_ssh_and_forwarded_unix_sockets_are_refused(self):
+        for endpoint in ("tcp://remote:2375", "ssh://server", "unix:///tmp/forwarded.sock"):
+            with self.subTest(endpoint=endpoint):
+                self.endpoint = endpoint
+                with self.assertRaises(space.SpaceError):
+                    self.docker.connect()
+
+    def test_other_builder_driver_or_daemon_is_refused(self):
+        for key, value in (("Driver", "docker-container"), ("Name", "other-context"), ("Nodes", [dict(Status="running", IDs=["other-engine"])])):
+            with self.subTest(key=key):
+                old = self.builder[key]
+                self.builder[key] = value
+                with self.assertRaises(space.SpaceError):
+                    self.docker.connect()
+                self.builder[key] = old
+
+    def test_no_selected_builder_and_stopped_builder_are_refused(self):
+        self.envelope["Current"] = False
+        with self.assertRaises(space.SpaceError):
+            self.docker.connect()
+        self.envelope["Current"] = True
+        self.builder["Nodes"][0]["Status"] = "stopped"
+        with self.assertRaises(space.SpaceError):
+            self.docker.connect()
+
+    def test_docker_host_override_does_not_silently_change_target(self):
+        os.environ["DOCKER_HOST"] = "unix:///other.sock"
+        with self.assertRaises(space.SpaceError):
+            self.docker.connect()
+
+    def test_custom_builder_environment_is_refused(self):
+        for key, value in (("BUILDX_BUILDER", "custom"), ("DOCKER_BUILDKIT", "0")):
+            with self.subTest(key=key):
+                os.environ[key] = value
+                with self.assertRaises(space.SpaceError):
+                    self.docker.connect()
+                del os.environ[key]
+
+    def test_old_engine_api_or_non_desktop_engine_is_refused(self):
+        self.version = "1.47"
+        with self.assertRaises(space.SpaceError):
+            self.docker.connect()
+        self.version = "1.49"
+        self.info["OperatingSystem"] = "Ubuntu"
+        with self.assertRaises(space.SpaceError):
+            self.docker.connect()
+
+    def test_inventory_includes_stopped_containers_and_inspects_references(self):
+        responses = {
+            "/images/json": [], "/containers/json": [dict(Id="stopped-container")],
+            "/containers/stopped-container/json": dict(Image=ident("a"), State=dict(Running=False)),
+            "/system/df": dict(BuildCache=None, LayersSize=0),
+        }
+        with patch.object(self.docker, "api", side_effect=lambda method, path, query=None: responses[path]) as api:
+            result = self.docker.inventory()
+        self.assertEqual(result["containers"][0]["Image"], ident("a"))
+        self.assertEqual(result["cache"], [])
+        api.assert_any_call("GET", "/containers/json", dict(all="true"))
+        api.assert_any_call("GET", "/images/json", dict(all="true", manifests="true"))
+
+    def test_missing_cache_inventory_fails_closed(self):
+        responses = {"/images/json": [], "/containers/json": [], "/system/df": dict(LayersSize=0)}
+        with patch.object(self.docker, "api", side_effect=lambda method, path, query=None: responses[path]):
+            with self.assertRaises(space.SpaceError):
+                self.docker.inventory()
 
 
 class SpaceFixture(unittest.TestCase):
@@ -437,6 +587,33 @@ class StateAndApplyTests(SpaceFixture):
         self.assertEqual(self.receipt()["status"], "partial")
         self.assertFalse((self.directory / "operation.lock").exists())
 
+    def test_api_error_after_partial_mutation_preserves_fresh_inventory(self):
+        def mutate_then_fail(docker, target):
+            docker.contents["images"] = [i for i in docker.contents["images"] if target not in i["RepoTags"]]
+            raise space.SpaceError("connection dropped after image removal")
+        self.docker.delete_hook = mutate_then_fail
+        with self.assertRaises(space.SpaceError):
+            self.apply()
+        saved = self.receipt()
+        observed = saved["steps"][0]["after_inventory"]["images"]
+        self.assertNotIn(ident("a"), [i["Id"] for i in observed])
+        self.assertEqual(saved["status"], "partial")
+        self.assertEqual(self.docker.deleted, ["dclaude:0.0.1"])
+
+    def test_cache_refusal_is_recorded_as_skipped_without_wider_prune(self):
+        self.args.action = "cache"
+        self.docker.contents["cache"] = [cache("a")]
+        with patch.object(self.docker, "delete_cache", return_value=dict(CachesDeleted=None, SpaceReclaimed=0)) as delete:
+            self.apply()
+        delete.assert_called_once_with("a")
+        self.assertEqual(self.receipt()["steps"][0]["status"], "skipped")
+
+    def test_unrelated_inventory_change_aborts_before_first_delete(self):
+        self.docker.inventory_hooks[2] = lambda d: d.contents["images"].append(image("b", RepoTags=["other:project"]))
+        with self.assertRaises(space.SpaceError):
+            self.apply()
+        self.assertEqual(self.docker.deleted, [])
+
     def test_cache_shared_after_confirmation_is_never_deleted(self):
         self.args.action = "cache"
         self.docker.contents["cache"] = [cache("a")]
@@ -488,6 +665,13 @@ class StateAndApplyTests(SpaceFixture):
                 with self.assertRaises(space.SpaceError):
                     space.load_policy(self.directory)
 
+    def test_boolean_schema_version_is_not_version_one(self):
+        self.directory.mkdir()
+        path = self.directory / "policy.json"
+        path.write_text('{"schema_version": true}')
+        with self.assertRaises(space.SpaceError):
+            space.read_json(path)
+
 
 class CommandTests(SpaceFixture):
     def run_main(self, *args):
@@ -503,6 +687,13 @@ class CommandTests(SpaceFixture):
         self.assertIn("cache_plan", report)
         self.assertEqual(self.docker.deleted, [])
         self.assertFalse(self.directory.exists())
+
+    def test_abbreviated_hidden_flags_cannot_bypass_wrapper_rejection(self):
+        for args in (("--current-im", "other:tag"), ("--tool-h", "/tmp"), ("--wrapp", "other"), ("--auto-ret",)):
+            with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as caught:
+                    space.parser().parse_args(list(args))
+                self.assertEqual(caught.exception.code, 2)
 
     def test_json_apply_is_rejected(self):
         self.assertEqual(self.run_main("images", "--apply", "--json"), 2)
@@ -568,6 +759,26 @@ class CommandTests(SpaceFixture):
         self.assertEqual(self.docker.deleted, ["dclaude:0.0.1"])
         self.confirm_mock.assert_not_called()
         self.assertFalse((self.directory / "pending-build").exists())
+
+    def test_failed_auto_retention_keeps_pending_for_later_review(self):
+        self.policy()
+        (self.directory / "pending-build").write_text(ident("f") + "\n")
+        self.docker.delete_hook = lambda *_: (_ for _ in ()).throw(space.SpaceError("busy image"))
+        self.assertEqual(self.run_main("--auto-retain"), 2)
+        self.assertTrue((self.directory / "pending-build").exists())
+        self.assertEqual(self.receipt()["status"], "partial")
+
+    def test_noop_auto_retention_consumes_pending_after_protection_checks(self):
+        self.policy(keep=2)
+        (self.directory / "pending-build").write_text(ident("f") + "\n")
+        self.assertEqual(self.run_main("--auto-retain"), 0)
+        self.assertEqual(self.docker.deleted, [])
+        self.assertFalse((self.directory / "pending-build").exists())
+
+    def test_json_retention_status_is_one_json_document(self):
+        self.policy()
+        self.assertEqual(self.run_main("retention", "status", "--json"), 0)
+        self.assertTrue(json.loads(self.output.getvalue())["enabled"])
 
     def test_auto_retention_cannot_outlive_policy_disabled_before_lock(self):
         self.policy()

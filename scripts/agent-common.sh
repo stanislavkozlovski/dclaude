@@ -115,6 +115,9 @@ dispatch_space() {
   shift
   for argument in "$@"; do
     case "$argument" in
+      --tool-home|--tool-home=*|--current-image|--current-image=*|--wrapper|--wrapper=*|--auto-retain|--auto-retain=*)
+        die "$argument is an internal Docker space option and cannot be supplied through the wrapper"
+        ;;
       --ssh|--rebuild|--reset|--stop|--check-update|--update-launcher|--update-tool|--yes|--profile|--profile=*|--list-profiles|--version|-v|--space)
         die "--space cannot be combined with $argument; --yes only authorizes updates"
         ;;

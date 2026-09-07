@@ -158,6 +158,15 @@ launch_agent claude "$@"
         self.assertNotIn("python", self.calls())
         self.assertFalse((self.state / "operation.lock").exists())
 
+    def test_public_space_cannot_override_internal_context_or_skip_confirmation(self):
+        for option in ("--tool-home", "--current-image", "--wrapper", "--auto-retain"):
+            for form in (option, option + "=override"):
+                with self.subTest(option=form):
+                    result = self.run_wrapper("--space", form)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("internal Docker space option", result.stderr)
+                    self.assertEqual(self.calls(), "")
+
     def test_default_build_is_labelled_and_locked_through_bootstrap(self):
         self.enable_retention()
         result = self.run_launch("--rebuild")

@@ -6,6 +6,7 @@ must opt in and its daemon must initially have no images or containers.
 """
 
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -14,8 +15,10 @@ import pty
 import select
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -164,6 +167,45 @@ def prove_exact_cache_selection(helper, report):
     }
 
 
+def prove_incident_scale():
+    """Time a real inventory with hundreds of unrelated immutable identities."""
+    tar_buffer = io.BytesIO()
+    with tarfile.open(fileobj=tar_buffer, mode="w"):
+        pass
+    empty_tar = tar_buffer.getvalue()
+    tags = [f"space-unrelated:fixture-{index:03d}" for index in range(280)]
+
+    def import_image(tag):
+        result = subprocess.run(
+            ["docker", "image", "import", "--change", "LABEL space.fixture=" + tag, "-", tag],
+            input=empty_tar, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+        assert result.returncode == 0, (tag, result.stdout.decode(errors="replace"))
+        return result.stdout.decode().strip()
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        imported_ids = set(executor.map(import_image, tags))
+    assert len(imported_ids) == len(tags), "Fixture imports must have distinct image identities"
+    for index in range(20):
+        command("docker", "create", "--name", f"space-proof-scale-{index:02d}", CURRENT, "/not-executed")
+    report = diagnosis()
+    actual_images = {image["Id"] for image in report["inventory"]["images"]}
+    assert imported_ids <= actual_images, "The inventory omitted unrelated imported images"
+    assert len(report["inventory"]["containers"]) >= 21, "The inventory omitted stopped containers"
+    assert not report["plan"]["candidates"], report["plan"]["candidates"]
+    unrelated_families = [family for family in report["plan"]["families"] if family["id"] in imported_ids]
+    assert len(unrelated_families) == len(imported_ids)
+    assert all(family["reasons"] and not family["owned"] for family in unrelated_families)
+    EVIDENCE["incident_scale"] = {
+        "imported_unrelated_images": len(imported_ids),
+        "distinct_inventory_images": len(actual_images),
+        "stopped_containers": len(report["inventory"]["containers"]),
+        "diagnosis_seconds": EVIDENCE["diagnosis_seconds"][-1],
+        "unrelated_images_protected": len(unrelated_families),
+        "image_cleanup_candidates": len(report["plan"]["candidates"]),
+    }
+    print(json.dumps({"incident_scale": EVIDENCE["incident_scale"]}, indent=2), flush=True)
+
+
 def main():
     assert platform.system() == "Darwin", "This proof requires actual macOS"
     assert os.environ.get("GITHUB_ACTIONS") == "true", "Use a fresh GitHub-hosted runner"
@@ -272,6 +314,7 @@ def main():
         disabled = json.loads((state / "policy.json").read_text())
         assert disabled["enabled"] is False
         EVIDENCE["retention_policy_disabled"] = disabled
+        prove_incident_scale()
         EVIDENCE["passed"] = True
         print(json.dumps({"passed": True, "whole_cleanup_delta": delta,
                           "exact_cache_selection": EVIDENCE["exact_cache_selection"]}, indent=2), flush=True)

@@ -686,7 +686,7 @@ def apply_cleanup(docker, host, args, directory, automatic=False):
 
 
 def parser():
-    result = argparse.ArgumentParser(prog="dclaude --space", formatter_class=argparse.RawDescriptionHelpFormatter, description="Measure and explicitly reclaim local macOS Docker Desktop storage. Read-only by default.",
+    result = argparse.ArgumentParser(allow_abbrev=False, prog="dclaude --space", formatter_class=argparse.RawDescriptionHelpFormatter, description="Measure and explicitly reclaim local macOS Docker Desktop storage. Read-only by default.",
         epilog="""Commands (also available through dcodex):
   images                 Preview launcher image families and their protections.
   images --keep 2 --apply Review and confirm exact old image targets.
