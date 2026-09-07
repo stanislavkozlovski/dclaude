@@ -7,6 +7,7 @@ This repo provides a Dockerized wrapper around the official Claude Code and Code
 - one shared Docker image
 - two user-facing entrypoints: `dclaude` and `dcodex`
 - one shared shell helper for runtime assembly
+- one host Python helper for Docker storage reports, measured cleanup, and image retention
 - one `docs/VERSION` file that drives image naming and releases
 - four GitHub Actions workflows for CI, scheduled tool refreshes, green tool-update auto-merges, and tagged releases
 
@@ -44,7 +45,7 @@ Thin wrappers that:
 - mount the target repo and support paths with same-path bind mounts
 - run the container as the current host UID/GID
 - launch the correct interactive CLI command
-- expose `--version`, `--check-update`, `--update-launcher`, and `--update-tool` without requiring a target git repo
+- expose `--version`, `--check-update`, `--update-launcher`, `--update-tool`, and `--space` without requiring a target git repo
 
 ### `scripts/agent-common.sh`
 
@@ -64,7 +65,35 @@ Holds the shared launch logic:
 - optional SSH agent forwarding
 - Codex multi-profile support (`--profile NAME`, `--list-profiles`)
 - image build bootstrap
+- early host-only storage dispatch and coordination of launcher builds/container creation with cleanup
 - `/workspace` compatibility alias setup
+
+### `scripts/space.py`
+
+Implements the shared `--space` workflow using Python's standard library on the
+host. It inventories the verified local Docker Desktop daemon and default
+`docker`-driver builder, groups images by immutable identity, protects container
+references and aliases, and plans image or separately authorized cache deletion.
+Unresolved metadata disables the affected cleanup instead of broadening it.
+
+Before each apply it writes a receipt, collects required host baselines, and
+rechecks target identities and eligibility. Image removal is unforced and avoids
+parent pruning; cache removal filters approved private, reclaimable record IDs.
+The receipt records each completed action so interruption preserves partial
+results. `verify` only remeasures; receipts never execute deletion plans.
+
+Host probes use the disk-image file's allocated blocks and APFS container counters,
+deduplicated by identity. They keep image/cache accounting separate from signed
+observed host recovery, record denied paths as unmeasured, and perform no directory
+walks or Docker restarts. See [the storage guide](SPACE.md) for commands, protections,
+supported setups, and validation limits.
+
+Retention is opt-in, applies only to labelled history in the exact `dclaude`
+repository, and runs after both a successful image build and warm-container
+bootstrap. A pending-build marker carries standalone tool-update builds to the
+next successful launch. Custom image/builder overrides bypass it, and failures
+warn without blocking a healthy launch. Docker's native GC owns ongoing cache
+eviction; the launcher never changes Docker Engine settings.
 
 ### `scripts/dclaude.yaml.example`
 
@@ -95,7 +124,9 @@ Checks the pinned upstream tool versions and can rewrite the repo when newer ver
 
 ### `.github/workflows/ci.yml`
 
-Runs shell linting and smoke checks on pull requests and `main`. On successful non-bot pushes to `main`, it also bumps the patch version and pushes the matching release tag.
+Runs shell linting, Python unit tests, macOS filesystem/APFS probes, and smoke
+checks on pull requests and `main`. On successful non-bot pushes to `main`, it also
+bumps the patch version and pushes the matching release tag.
 
 ### `.github/workflows/tool-updates.yml`
 
@@ -201,18 +232,30 @@ Release automation:
 
 ## Persistent State
 
-This repo has no application database. Persistence consists of host-mounted auth and cache directories plus warm Docker containers keyed by tool and target repo.
+This repo has no application database. Persistence consists of host-mounted auth
+and cache directories, host-only storage policy/receipts, and warm Docker
+containers keyed by tool and target repo.
 
 ### Database Schema
 
 None.
 
-There are no tables, collections, migrations, or ORM models in this project. The only stateful paths are filesystem mounts:
+There are no tables, collections, or ORM models in this project. Auth and cache
+paths are filesystem mounts:
 
 - Claude auth/config: `~/.claude`, `~/.claude.json`, `~/.config/claude-code`
 - Codex state: `~/.codex` (or `~/.codex-NAME` per profile)
 - shared caches: `~/.cache/dclaude/cx` on host mapped to `~/.cache/cx` in-container, plus `~/.cache/pip`, `~/.cache/uv`
 - launcher update check throttle: `~/.cache/dclaude/launcher-update-check`
+
+Host-only storage state lives under `~/.local/state/dclaude/space`, outside the
+agent auth/cache mounts. Versioned JSON (`schema_version: 1`) stores the image
+retention policy, cleanup receipts, and latest-receipt pointer. A pending-build
+marker holds the built image ID. Unknown versions and inability to persist a
+receipt disable apply. Turning
+retention off changes the policy without erasing receipts. A coordination lock
+serializes cooperating launcher lifecycle operations and storage mutation; it is
+not a Docker-wide transaction.
 
 Additional non-database runtime state:
 

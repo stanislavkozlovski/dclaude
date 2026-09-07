@@ -11,3 +11,24 @@ dclaude --update-launcher
 dcodex --profile magi        # use a named Codex profile (~/.codex-magi)
 dcodex --list-profiles        # list available Codex profiles
 ```
+
+Storage commands run in the host terminal from any directory. They require host
+Python 3; cleanup supports local Docker Desktop on macOS.
+
+```bash
+dclaude --space                         # diagnose and preview images; no deletion
+dclaude --space images --keep 2 --apply  # review and confirm old image deletion
+dclaude --space cache                   # fresh cache preview after image cleanup
+dclaude --space cache --apply           # separately confirm builder-wide cache cleanup
+dclaude --space verify                  # remeasure the latest cleanup
+dclaude --space retention enable        # opt into retaining recent labelled builds
+dclaude --space retention status
+dclaude --space retention disable
+dclaude --space --json                  # structured read-only report
+dclaude --space --help
+```
+
+`dcodex --space` works identically. See [Recover Docker space on a Mac](SPACE.md)
+for image protections, `--disk-image`, receipt recovery, cache budgets, and support
+limits. Deletion requires its own interactive confirmation; `--yes` remains an
+update option.

@@ -99,6 +99,7 @@ Some features:
 - Docker Desktop or Docker Engine with `docker`
 - a trusted repo
 - Docker Desktop file sharing enabled for the repo path and each configured home mount on macOS
+- host Python 3 for optional `--space` commands and tool-pin updates
 
 ## Option A: Homebrew
 
@@ -180,6 +181,7 @@ Wrapper options:
 - `--ssh` enables SSH agent forwarding by mounting `/run/host-services/ssh-auth.sock` and `~/.ssh/known_hosts` when available
 - `--profile NAME` (Codex only) uses a named profile with a separate `~/.codex-NAME` config directory, giving you isolated auth, state, and skills per profile
 - `--list-profiles` (Codex only) lists available Codex profiles
+- `--space` diagnoses Docker Desktop storage on macOS and previews old launcher images; see [Docker space cleanup](docs/SPACE.md)
 - `--version` prints the installed launcher version without requiring Docker or a git repo
 - `--` passes the remaining arguments to the underlying CLI
 
@@ -202,6 +204,33 @@ Examples:
 ./dcodex --profile magi --ssh
 ./dcodex --list-profiles
 ```
+
+## Docker Space Cleanup
+
+Both launchers can preview old shared images, separately clear retained builder
+cache, and measure the Mac's observed free-space change. Run from any host
+directory; no agent or target repository is needed.
+
+```bash
+dclaude --space                         # read-only diagnosis and image preview
+dclaude --space images --keep 2 --apply  # fresh plan and interactive confirmation
+dclaude --space cache                   # inspect cache after image cleanup
+dclaude --space cache --apply           # separate confirmation for builder-wide cache
+dclaude --space verify                  # remeasure the latest cleanup receipt
+dclaude --space retention enable        # opt into keeping recent labelled builds
+dclaude --space retention disable       # stop automatic image cleanup
+dclaude --space --help
+```
+
+Cleanup preserves running and stopped containers, volumes, and protected image
+aliases. Retention is off by default and keeps at least two distinct builds;
+container references can protect more. Cache cleanup can affect rebuild speed for
+any project on the default builder. Host Python 3 is required for storage mode.
+The update-only `--yes` flag does not authorize deletion.
+
+See [Recover Docker space on a Mac](docs/SPACE.md) for all options, supported
+setups, image protections, recovery measurements, receipts, and a native Docker
+cache-budget example.
 
 ## Folder Mount Config
 
@@ -330,6 +359,7 @@ Primary docs live under [`docs/`](docs/):
 
 - [How To Run](docs/HOWRUN.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [Docker Space Cleanup](docs/SPACE.md)
 - [Motivation](docs/motivation.md)
 - [License](docs/LICENSE)
 - [Version](docs/VERSION)
@@ -434,7 +464,7 @@ A scheduled GitHub Actions workflow runs the same updater, validates that the im
 Release shape:
 
 - `docs/VERSION` is the source of truth for the launcher version
-- CI on pull requests and `main` runs `shellcheck`, `bash -n`, `docker build`, `--help`, and `--version`
+- CI on pull requests and `main` runs `shellcheck`, `bash -n`, Python unit tests, macOS storage probes, `docker build`, `--help`, and `--version`
 - a scheduled tool-update workflow refreshes pinned upstream tool versions and opens a PR when updates are available
 - a successful non-bot push to `main` bumps the patch version, commits `chore: release vX.Y.Z`, and pushes the matching `vX.Y.Z` tag
 - the tag workflow creates `dclaude-vX.Y.Z.tar.gz`, publishes the GitHub Release, and updates `stanislavkozlovski/homebrew-tap` when `HOMEBREW_TAP_TOKEN` is configured
