@@ -538,11 +538,60 @@ def kept_reason(family):
     return "needs inspection" if reasons else "cleanup blocked"
 
 
-def print_report(report, action, wrapper="dclaude", applying=False, disk_image=None):
-    plan, host = report["plan"], report["host"]
+def next_actions(wrapper, action, *, report=None, delta=None, completed=False, disk_image=None):
+    """Choose useful commands from observations; never invent cleanup work."""
     command = f"{wrapper} --space"
     location = f" --disk-image {shlex.quote(str(disk_image))}" if disk_image else ""
-    print("Docker storage")
+    hints = []
+    if report is not None:
+        plan, host = report["plan"], report["host"]
+        keep = f" --keep {plan['keep']}" if action == "images" else ""
+        if plan["candidates"] and not plan["issues"] and host["complete"]:
+            purpose = "Review image deletion" if action == "images" else "Review cache deletion (future builds may need downloads)"
+            hints.append((purpose, f"{command} {action}{keep}{location} --apply"))
+        else:
+            cache = report.get("cache_plan")
+            if action == "images" and cache and cache["candidates"] and not cache["issues"]:
+                hints.append(("Review unused build cache", f"{command} cache{location}"))
+        hints.append(("Inspect image protections" if action == "images" else "Inspect all cache records",
+                      f"{command} {action}{keep}{location} --json"))
+    elif delta is not None:
+        if delta["measured"] and not delta.get("recovery_observed"):
+            hints.append(("Check for delayed recovery later", f"{command} verify"))
+        if completed and action == "images":
+            hints.append(("Review cache after image cleanup", f"{command} cache{location}"))
+        hints.append(("Inspect recovery measurements", f"{command} verify --json"))
+    elif action == "retention":
+        hints.append(("Inspect the saved policy", f"{command} retention status --json"))
+    return hints[:3]
+
+
+def print_next(hints):
+    if hints:
+        print("\nNext")
+        for purpose, command in hints:
+            print(f"  {purpose}:\n    {command}")
+
+
+def print_result(message):
+    print(f"Result\n  {message}")
+
+
+class ReportedError(SpaceError):
+    """The human report already displayed the specific blocking issues."""
+
+
+def print_report(report, action, wrapper="dclaude", applying=False, disk_image=None):
+    plan, host = report["plan"], report["host"]
+    blocked = bool(plan["issues"] or not host["complete"])
+    if blocked:
+        result = "Cleanup blocked; nothing deleted." if applying else "Preview only; cleanup is blocked."
+    elif not plan["candidates"]:
+        result = "Nothing to clean." if action == "cache" else "No images eligible for cleanup."
+    else:
+        result = f"{'Review' if applying else 'Preview'} {len(plan['candidates'])} {action} candidates; nothing deleted."
+    print_result(result)
+    print("\nDocker storage")
     raw = host["disk_image"]
     row("Disk used", human_bytes(raw["allocated_bytes"] if raw else None))
     startup = next((c for c in host["containers"] if "startup" in c["roles"]), None)
@@ -607,50 +656,57 @@ def print_report(report, action, wrapper="dclaude", applying=False, disk_image=N
         if records:
             print("  Reported sizes may overlap; actual disk recovery can differ.")
 
-    print()
+    issues = []
     for issue in plan["issues"]:
         missing = re.fullmatch(r"Configured current image (.+) is unresolved; build it before image cleanup\.", issue)
-        message = f"this checkout's image ({missing[1]}) is not built." if missing else issue
-        print(f"{'Image' if action == 'images' else 'Cache'} cleanup blocked: {message}")
-    for issue in host["issues"]:
-        print(f"Host measurement unavailable: {issue['message']}")
+        if missing:
+            issues.append(f"Image cleanup requires {missing[1]}, which is not built.")
+            issues.append("Building it will not release images used by containers.")
+        else:
+            issues.append(issue)
+    issues.extend(issue["message"] for issue in host["issues"])
     if not host["complete"]:
-        print("Check Docker.raw path and terminal access; use --disk-image PATH if the file moved.")
-    if cache is not None and action != "cache" and cache["issues"]:
-        for issue in cache["issues"]:
-            print(f"Cache cleanup blocked: {issue}")
-    if not applying:
-        if candidates and not plan["issues"] and host["complete"]:
-            keep = f" --keep {plan['keep']}" if action == "images" else ""
-            row("Next step", f"{command} {action}{keep}{location} --apply")
-        elif action == "images" and cache is not None and cache["candidates"] and not cache["issues"]:
-            row("Next step", f"{command} cache{location}")
-        keep = f" --keep {plan['keep']}" if action == "images" and plan["keep"] != 2 else ""
-        row("Details", f"{command} {action}{keep}{location} --json")
-        print("\nPreview only — nothing deleted.")
+        issues.append("Check Docker.raw path and terminal access; use --disk-image PATH if the file moved.")
+    if cache is not None and action != "cache":
+        issues.extend(cache["issues"])
+    if issues:
+        print("\nIssues")
+        for issue in issues:
+            print(f"  {issue}")
+    if not applying or blocked or not candidates:
+        print_next(next_actions(wrapper, action, report=report, disk_image=disk_image))
 
 
-def print_recovery(delta, receipt_path, wrapper, title="Verification"):
-    print(f"\n{title}")
+def print_recovery(delta, receipt_path, wrapper, title="Verification", *, action=None, disk_image=None, skipped=0):
+    print_result(title + (" — recovery measured." if delta["measured"] else " — recovery unmeasured."))
+    print("\nMeasurements")
+    issues = []
     if delta["measured"]:
         change = delta["raw_allocated_bytes_reduction"]
-        row("Disk change", f"{human_bytes(change)} {'less' if change >= 0 else 'more'} allocated")
+        row("Disk change", "Unchanged" if change == 0 else f"{human_bytes(change)} {'less' if change > 0 else 'more'} allocated")
         for container in delta["apfs"]:
             free = container["free_bytes_delta"]
             label = "Mac free change" if "startup" in container["roles"] else "External change"
             row(label, f"{'+' if free >= 0 else '-'}{human_bytes(free)}")
         print("  Free-space changes include other host activity.")
         if not delta.get("recovery_observed"):
-            print("  Recovery not yet observed.")
-            row("Check later", f"{wrapper} --space verify")
+            issues.append("Recovery not yet observed.")
     else:
         row("Disk change", "Unmeasured")
-        print(f"  {delta['reason']}")
+        issues.append(delta["reason"])
     row("Receipt", receipt_path)
+    if skipped:
+        row("Retained", f"{skipped} cache records still referenced by Docker")
+    if issues:
+        print("\nIssues")
+        for issue in issues:
+            print(f"  {issue}")
+    print_next(next_actions(wrapper, action, delta=delta, completed=title == "Cleanup complete", disk_image=disk_image))
 
 
 def print_policy(policy, wrapper):
-    print("Image retention")
+    print_result("Image retention enabled." if policy and policy["enabled"] else "Image retention disabled.")
+    print("\nPolicy")
     row("Status", "Enabled" if policy and policy["enabled"] else "Disabled")
     if policy:
         row("Keep newest", f"{policy['keep']} distinct builds")
@@ -659,8 +715,7 @@ def print_policy(policy, wrapper):
     if policy and policy["enabled"]:
         print("\nRuns after successful build and startup. Only labelled dclaude images are eligible.")
         print("Current images, container references and tags used elsewhere stay protected.")
-    row("Details", f"{wrapper} --space retention status --json")
-    print("Native cache GC setup: docs/SPACE.md")
+    print_next(next_actions(wrapper, "retention"))
 
 
 def confirm(action, count):
@@ -734,13 +789,18 @@ def apply_cleanup(docker, host, args, directory, automatic=False):
         validate_latest(directory)
         report = collect(docker, host, args, automatic)
         if not automatic:
+            if args.action == "images":
+                # Cache hints are presentation only; cache metadata cannot alter image eligibility.
+                try:
+                    report["cache_plan"] = cache_plan(report["inventory"])
+                except SpaceError as exc:
+                    report["cache_plan"] = dict(candidates=[], protected=[], issues=[str(exc)])
             print_report(report, args.action, args.wrapper, applying=True, disk_image=args.disk_image)
         if report["plan"]["issues"] or not report["host"]["complete"]:
-            raise SpaceError("Cleanup blocked: complete image/cache and host baselines are required.")
+            error = SpaceError if automatic else ReportedError
+            raise error("Cleanup blocked: complete image/cache and host baselines are required.")
         candidates = report["plan"]["candidates"]
         if not candidates:
-            if not automatic:
-                print("No eligible targets; nothing deleted.")
             if automatic:
                 (directory / "pending-build").unlink()
             return None
@@ -845,13 +905,9 @@ def apply_cleanup(docker, host, args, directory, automatic=False):
             receipt["finished_at"] = now()
         save()
         if not automatic:
-            print_recovery(receipt["delta"], receipt_path, args.wrapper, "Cleanup complete")
             skipped = sum(step["status"] == "skipped" for step in receipt["steps"])
-            if skipped:
-                row("Retained", f"{skipped} cache records still referenced by Docker")
-            if args.action == "images":
-                location = f" --disk-image {shlex.quote(str(args.disk_image))}" if args.disk_image else ""
-                row("Next step", f"{args.wrapper} --space cache{location}")
+            print_recovery(receipt["delta"], receipt_path, args.wrapper, "Cleanup complete",
+                           action=args.action, disk_image=args.disk_image, skipped=skipped)
         if automatic:
             pending = directory / "pending-build"
             if pending.read_text().strip() == pending_id:
@@ -877,7 +933,8 @@ Runs before repository lookup, builds, updates, or agent startup. Ordinary
 launches need no new Python installation. --apply requires a terminal; --yes
 only authorizes launcher updates. Other Docker clients must be idle.
 For moved Docker.raw files use --disk-image PATH from Desktop Settings.
-Default output is a short summary; --json includes full IDs, references, and bytes.
+Default output uses Result, measurements, Issues (when needed), and Next commands.
+--json includes full IDs, references, and bytes.
 --apply lists every exact target before asking for confirmation.
 See docs/SPACE.md for examples, protections, receipts, and native cache GC setup.""")
     result.add_argument("action", nargs="?", choices=["images", "cache", "verify", "retention"], default="images")
@@ -922,7 +979,8 @@ def main(argv=None):
                         policy = load_policy(directory)
                         policy["enabled"] = False
                         write_json(directory / "policy.json", policy)
-                print("Image retention disabled. Nothing deleted.")
+                print_result("Image retention disabled. Nothing deleted.")
+                print_next(next_actions(args.wrapper, "retention"))
             elif args.json:
                 print(json.dumps(policy or dict(schema_version=SCHEMA, enabled=False), indent=2))
             else:
@@ -995,8 +1053,8 @@ def main(argv=None):
     except (SpaceError, OSError, ValueError, KeyError, TypeError) as exc:
         if args.json:
             print(json.dumps(dict(schema_version=SCHEMA, error=str(exc), mutation_allowed=False)))
-        else:
-            print(f"{args.wrapper} --space: {exc}", file=sys.stderr)
+        elif not isinstance(exc, ReportedError):
+            print(f"Result\n  Command failed.\n\nIssues\n  {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
         print("Interrupted; any partial cleanup is recorded in the receipt.", file=sys.stderr)

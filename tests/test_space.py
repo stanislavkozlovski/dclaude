@@ -915,6 +915,17 @@ class CommandTests(SpaceFixture):
                 contextlib.redirect_stderr(self.output):
             return space.main(["--current-image", "dclaude:0.0.9", *args])
 
+    def test_blocked_apply_explains_issue_once_and_preserves_guard(self):
+        self.docker.contents["images"] = self.docker.contents["images"][:1]
+        self.assertEqual(self.run_main("images", "--apply"), 2)
+        output = self.output.getvalue()
+        self.assertIn("Image cleanup requires dclaude:0.0.9", output)
+        self.assertIn("Building it will not release images used by containers", output)
+        self.assertNotIn("complete image/cache and host baselines", output)
+        self.assertEqual(output.count("\nNext\n"), 1)
+        self.assertEqual(self.docker.deleted, [])
+        self.assertFalse((self.directory / "latest.json").exists())
+
     def test_json_preview_is_readonly_and_machine_parseable(self):
         self.assertEqual(self.run_main("--json"), 0)
         report = json.loads(self.output.getvalue())

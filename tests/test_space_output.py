@@ -33,11 +33,11 @@ class OutputTests(unittest.TestCase):
         output = render(space.print_report, blocked_report(), "images")
         for text in ("29.9 GiB", "29.6 GiB", "2 dclaude images — used by containers",
                      "2 images (other projects)", "58 unused private records", "3.6 GiB",
-                     "this checkout's image (dclaude:0.1.85) is not built.", "dclaude --space cache"):
+                     "Image cleanup requires dclaude:0.1.85, which is not built.", "dclaude --space cache"):
             self.assertIn(text, output)
         for noise in ("sha256:", "Unix time", "apfs-1", "32058363904", "{'", "--apply"):
             self.assertNotIn(noise, output)
-        self.assertLessEqual(len(output.splitlines()), 24)
+        self.assertLessEqual(len(output.splitlines()), 30)
 
     def test_cache_preview_is_bounded_but_apply_shows_every_exact_record(self):
         report = blocked_report()
@@ -104,6 +104,50 @@ class OutputTests(unittest.TestCase):
                         disk_image="/Volumes/External Disk/Docker.raw")
         self.assertIn("dcodex --space cache --disk-image '/Volumes/External Disk/Docker.raw'", output)
         self.assertIn("dcodex --space images --keep 4 --disk-image '/Volumes/External Disk/Docker.raw' --json", output)
+
+
+class NextActionTests(unittest.TestCase):
+    def test_eligible_preview_recommends_review_and_blocked_preview_does_not(self):
+        contents = inventory()
+        report = dict(plan=space.image_plan(contents, "dclaude:0.0.9", keep=1), host=measurement())
+        hints = space.next_actions("dcodex", "images", report=report)
+        self.assertEqual(hints[0][1], "dcodex --space images --keep 1 --apply")
+        report["host"]["complete"] = False
+        self.assertFalse(any("--apply" in command for _, command in space.next_actions("dcodex", "images", report=report)))
+
+    def test_no_candidates_offers_details_without_inventing_cache_work(self):
+        report = blocked_report()
+        report["plan"]["issues"] = []
+        report["cache_plan"]["candidates"] = []
+        hints = space.next_actions("dclaude", "images", report=report)
+        self.assertEqual(len(hints), 1)
+        self.assertTrue(hints[0][1].endswith("--json"))
+        output = render(space.print_report, report, "images")
+        self.assertIn("No images eligible for cleanup", output)
+        self.assertNotIn("\nIssues", output)
+
+    def test_recovery_prioritizes_verify_then_fresh_cache_and_preserves_scope(self):
+        delta = dict(measured=True, recovery_observed=False)
+        hints = space.next_actions("dcodex", "images", delta=delta, completed=True,
+                                   disk_image="/External Disk/Docker.raw")
+        self.assertEqual(hints[0][1], "dcodex --space verify")
+        self.assertEqual(hints[1][1], "dcodex --space cache --disk-image '/External Disk/Docker.raw'")
+        self.assertEqual(len(hints), 3)
+        delta["recovery_observed"] = True
+        self.assertEqual(space.next_actions("dcodex", "images", delta=delta, completed=True)[0][1], "dcodex --space cache")
+
+    def test_unmeasured_recovery_does_not_promise_a_retry_will_fix_it(self):
+        hints = space.next_actions("dclaude", "verify", delta=dict(measured=False))
+        self.assertEqual(hints, [("Inspect recovery measurements", "dclaude --space verify --json")])
+
+    def test_section_order_and_single_next_section(self):
+        output = render(space.print_report, blocked_report(), "images", applying=True)
+        self.assertLess(output.index("Result"), output.index("Docker storage"))
+        self.assertLess(output.index("Docker storage"), output.index("\nIssues"))
+        self.assertLess(output.index("\nIssues"), output.index("\nNext"))
+        self.assertEqual(output.count("\nNext\n"), 1)
+        for old in ("Next step", "Check later", "Details"):
+            self.assertNotIn(old, output)
 
 
 if __name__ == "__main__":

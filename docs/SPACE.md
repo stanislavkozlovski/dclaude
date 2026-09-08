@@ -35,9 +35,9 @@ Disk Access.
 
 ## CLI output examples
 
-These are illustrative fixtures, not measurements of your Mac. Cache sizes in the
-first example are illustrative; the image counts and disk totals match the reported
-four-image case. `dcodex` provides the same output and commands.
+Examples use illustrative fixtures. Every human response follows Result →
+measurements or policy → Issues, when present → Next. Suggestions depend on the
+observed state and preserve the wrapper, keep count, and explicit disk-image path.
 
 ### Image overview
 
@@ -47,6 +47,9 @@ dclaude --space
 ```
 
 ```text
+Result
+  Preview only; cleanup is blocked.
+
 Docker storage
   Disk used       29.9 GiB
   Mac free        29.6 GiB
@@ -62,12 +65,56 @@ Build cache
   Kept            9 shared, in-use or internal records
   Reported sizes may overlap; actual disk recovery can differ.
 
-Image cleanup blocked: this checkout's image (dclaude:0.1.85) is not built.
-  Next step       dclaude --space cache
-  Details         dclaude --space images --json
+Issues
+  Image cleanup requires dclaude:0.1.85, which is not built.
+  Building it will not release images used by containers.
 
-Preview only — nothing deleted.
+Next
+  Review unused build cache:
+    dclaude --space cache
+  Inspect image protections:
+    dclaude --space images --keep 2 --json
 ```
+
+### Blocked image apply
+
+```bash
+dclaude --space images --keep 2 --apply
+```
+
+```text
+Result
+  Cleanup blocked; nothing deleted.
+
+Docker storage
+  Disk used       29.9 GiB
+  Mac free        29.6 GiB
+
+Images
+  Removable       None
+  Kept            2 dclaude images — used by containers
+                  2 images (other projects)
+
+Build cache
+  Needs review    58 unused private records
+  Reported size   3.6 GiB
+  Kept            9 shared, in-use or internal records
+  Reported sizes may overlap; actual disk recovery can differ.
+
+Issues
+  Image cleanup requires dclaude:0.1.85, which is not built.
+  Building it will not release images used by containers.
+
+Next
+  Review unused build cache:
+    dclaude --space cache
+  Inspect image protections:
+    dclaude --space images --keep 2 --json
+```
+
+A missing configured image still blocks deletion and returns exit code 2.
+The specific issue is printed once. Building that image does not release existing
+container references. No deletion rule or JSON field changes in this update.
 
 ### Cache preview
 
@@ -75,10 +122,10 @@ Preview only — nothing deleted.
 dclaude --space cache
 ```
 
-Previews show the five largest candidates. JSON contains the complete inventory,
-full identities, sizes, ownership, references, and protection reasons.
-
 ```text
+Result
+  Preview 58 cache candidates; nothing deleted.
+
 Docker storage
   Disk used       29.9 GiB
   Mac free        29.6 GiB
@@ -97,10 +144,11 @@ Build cache
     … 53 more; --apply lists every target before confirmation.
   Reported sizes may overlap; actual disk recovery can differ.
 
-  Next step       dclaude --space cache --apply
-  Details         dclaude --space cache --json
-
-Preview only — nothing deleted.
+Next
+  Review cache deletion (future builds may need downloads):
+    dclaude --space cache --apply
+  Inspect all cache records:
+    dclaude --space cache --json
 ```
 
 ### Image deletion confirmation
@@ -109,10 +157,10 @@ Preview only — nothing deleted.
 dclaude --space images --keep 2 --apply
 ```
 
-Apply lists every candidate and its full immutable ID; tagged targets list every
-alias, and dangling targets use the full ID. It never truncates the consent list.
-
 ```text
+Result
+  Review 1 images candidates; nothing deleted.
+
 Docker storage
   Disk used       29.9 GiB
   Mac free        29.6 GiB
@@ -127,7 +175,6 @@ Images
       Image ID: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
       Legacy tag — review ownership before deletion.
 
-
 Image deletion has no undo; a rebuild may produce a different image.
 Keep other Docker clients and older launchers idle during cleanup.
 Delete the 1 exact images candidate(s) listed above? Type yes: yes
@@ -139,10 +186,10 @@ Delete the 1 exact images candidate(s) listed above? Type yes: yes
 dclaude --space cache --apply
 ```
 
-This smaller example has two eligible records. A real apply lists all records,
-including those omitted from the five-row preview. Receipts use an absolute path.
-
 ```text
+Result
+  Review 2 cache candidates; nothing deleted.
+
 Docker storage
   Disk used       29.9 GiB
   Mac free        29.6 GiB
@@ -157,34 +204,52 @@ Build cache
       32.0 MiB  cache-b  build cache-b
   Reported sizes may overlap; actual disk recovery can differ.
 
-
 Builder-wide cache deletion: any project's next build may need downloads or recompilation.
 Keep other Docker clients and older launchers idle during cleanup.
 Delete the 2 exact cache candidate(s) listed above? Type yes: yes
 
-Cleanup complete
+Result
+  Cleanup complete — recovery measured.
+
+Measurements
   Disk change     96.0 MiB less allocated
   Mac free change +95.0 MiB
   Free-space changes include other host activity.
   Receipt         ~/.local/state/dclaude/space/receipts/20260908T094500.json
+
+Next
+  Inspect recovery measurements:
+    dclaude --space verify --json
 ```
 
-### Verify later
+Apply always lists every exact target before confirmation. Previews show at
+most five candidates; omitted targets remain visible in JSON and during apply.
+The receipt path is absolute in actual output.
+
+### Verify delayed recovery
 
 ```bash
 dclaude --space verify
 ```
 
-A negative free-space change stays negative; increased disk allocation is shown
-as “more allocated.” Missing measurements say “Unmeasured.” External-disk free
-space is reported separately from the Mac startup disk.
-
 ```text
-Verification
-  Disk change     96.0 MiB less allocated
-  Mac free change +95.0 MiB
+Result
+  Verification — recovery measured.
+
+Measurements
+  Disk change     Unchanged
+  Mac free change +0 B
   Free-space changes include other host activity.
   Receipt         ~/.local/state/dclaude/space/receipts/20260908T094500.json
+
+Issues
+  Recovery not yet observed.
+
+Next
+  Check for delayed recovery later:
+    dclaude --space verify
+  Inspect recovery measurements:
+    dclaude --space verify --json
 ```
 
 ### Enable or inspect retention
@@ -194,10 +259,11 @@ dclaude --space retention enable --keep 2
 dclaude --space retention status
 ```
 
-Both commands display the saved policy. Status does not change it.
-
 ```text
-Image retention
+Result
+  Image retention enabled.
+
+Policy
   Status          Enabled
   Keep newest     2 distinct builds
   Docker context  desktop-linux
@@ -205,8 +271,10 @@ Image retention
 
 Runs after successful build and startup. Only labelled dclaude images are eligible.
 Current images, container references and tags used elsewhere stay protected.
-  Details         dclaude --space retention status --json
-Native cache GC setup: docs/SPACE.md
+
+Next
+  Inspect the saved policy:
+    dclaude --space retention status --json
 ```
 
 ### Disable retention
@@ -216,7 +284,12 @@ dclaude --space retention disable
 ```
 
 ```text
-Image retention disabled. Nothing deleted.
+Result
+  Image retention disabled. Nothing deleted.
+
+Next
+  Inspect the saved policy:
+    dclaude --space retention status --json
 ```
 
 ### Full detail and help
@@ -229,9 +302,11 @@ dclaude --space retention status --json
 dclaude --space --help
 ```
 
-Use `--json` when scripting: the default `verify` and `retention status` output is
-formatted for people. JSON fields and on-disk receipts preserve exact byte counts
-and complete metadata. The JSON schema and cleanup protections are unchanged.
+Use `--json` for scripting. Human suggestions do not add fields to the JSON
+schema or change receipt contents. If nothing is eligible, Next offers inspection
+without suggesting deletion. After image cleanup, it offers a fresh cache preview;
+if recovery is pending, checking later comes first. Missing measurements remain
+unmeasured, and external-disk space stays separate from startup-disk space.
 
 ## Clean up in two separate steps
 
