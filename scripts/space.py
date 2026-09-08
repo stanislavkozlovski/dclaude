@@ -489,6 +489,7 @@ def install_signal_handlers():
     def terminate(signum, _frame):
         raise SystemExit(128 + signum)
 
+    signal.signal(signal.SIGHUP, terminate)
     signal.signal(signal.SIGTERM, terminate)
 
 

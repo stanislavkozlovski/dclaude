@@ -981,6 +981,18 @@ class StateAndApplyTests(SpaceFixture):
             signal.signal(signal.SIGTERM, previous)
         self.assertFalse((self.directory / "operation.lock").exists())
 
+    def test_sighup_unwinds_and_removes_owned_lock(self):
+        previous = signal.getsignal(signal.SIGHUP)
+        try:
+            space.install_signal_handlers()
+            with self.assertRaises(SystemExit) as caught:
+                with space.operation_lock(self.directory):
+                    os.kill(os.getpid(), signal.SIGHUP)
+            self.assertEqual(caught.exception.code, 129)
+        finally:
+            signal.signal(signal.SIGHUP, previous)
+        self.assertFalse((self.directory / "operation.lock").exists())
+
     def test_symlink_state_is_rejected(self):
         target = Path(self.temp.name) / "target"
         target.mkdir()
