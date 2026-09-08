@@ -8,6 +8,7 @@ import io
 import json
 import os
 from pathlib import Path
+import signal
 import tempfile
 import threading
 import unittest
@@ -952,6 +953,18 @@ class StateAndApplyTests(SpaceFixture):
                 with space.operation_lock(self.directory):
                     self.fail("owner write failure yielded the lock")
         self.assertIs(caught.exception, failure)
+        self.assertFalse((self.directory / "operation.lock").exists())
+
+    def test_sigterm_unwinds_and_removes_owned_lock(self):
+        previous = signal.getsignal(signal.SIGTERM)
+        try:
+            space.install_signal_handlers()
+            with self.assertRaises(SystemExit) as caught:
+                with space.operation_lock(self.directory):
+                    os.kill(os.getpid(), signal.SIGTERM)
+            self.assertEqual(caught.exception.code, 143)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
         self.assertFalse((self.directory / "operation.lock").exists())
 
     def test_symlink_state_is_rejected(self):

@@ -18,6 +18,7 @@ import platform
 import plistlib
 import re
 import shlex
+import signal
 import socket
 import stat
 import subprocess
@@ -479,6 +480,13 @@ def read_json(path):
     if not isinstance(data, dict) or type(data.get("schema_version")) is not int or data["schema_version"] != SCHEMA:
         raise SpaceError(f"Unknown or invalid state schema at {path}; mutation disabled.")
     return data
+
+
+def install_signal_handlers():
+    def terminate(signum, _frame):
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, terminate)
 
 
 @contextlib.contextmanager
@@ -1014,6 +1022,7 @@ See docs/SPACE.md for examples, protections, receipts, and native cache GC setup
 
 
 def main(argv=None):
+    install_signal_handlers()
     arguments = list(sys.argv[1:] if argv is None else argv)
     args = parser().parse_args(arguments)
     try:
