@@ -15,8 +15,8 @@ Git repository. It needs host Python 3; ordinary agent launches do not.
 dclaude --space
 ```
 
-The default action is an image preview. It reports Docker coverage, protected
-images, cleanup candidates, cache accounting, and Mac measurements. A preview
+The default action is a compact image preview: disk usage, removable builds,
+protected-image counts, a cache summary, and the next command to run. A preview
 deletes nothing. Keep Docker Desktop running so the report can inspect its active
 image store and default builder.
 
@@ -32,6 +32,206 @@ empty. If macOS denies access, the report identifies the path and error; review
 your terminal's access in **System Settings → Privacy & Security**. `sudo` does
 not grant macOS privacy access. Diagnosis does not require granting blanket Full
 Disk Access.
+
+## CLI output examples
+
+These are illustrative fixtures, not measurements of your Mac. Cache sizes in the
+first example are illustrative; the image counts and disk totals match the reported
+four-image case. `dcodex` provides the same output and commands.
+
+### Image overview
+
+```bash
+dclaude --space
+# Equivalent: dclaude --space images
+```
+
+```text
+Docker storage
+  Disk used       29.9 GiB
+  Mac free        29.6 GiB
+
+Images
+  Removable       None
+  Kept            2 dclaude images — used by containers
+                  2 images (other projects)
+
+Build cache
+  Needs review    58 unused private records
+  Reported size   3.6 GiB
+  Kept            9 shared, in-use or internal records
+  Reported sizes may overlap; actual disk recovery can differ.
+
+Image cleanup blocked: this checkout's image (dclaude:0.1.85) is not built.
+  Next step       dclaude --space cache
+  Details         dclaude --space images --json
+
+Preview only — nothing deleted.
+```
+
+### Cache preview
+
+```bash
+dclaude --space cache
+```
+
+Previews show the five largest candidates. JSON contains the complete inventory,
+full identities, sizes, ownership, references, and protection reasons.
+
+```text
+Docker storage
+  Disk used       29.9 GiB
+  Mac free        29.6 GiB
+
+Build cache
+  Needs review    58 unused private records
+  Reported size   3.6 GiB
+  Kept            9 shared, in-use or internal records
+
+  Largest unused records
+      64.0 MiB  cache-00  build cache-00
+      64.0 MiB  cache-01  build cache-01
+      64.0 MiB  cache-02  build cache-02
+      64.0 MiB  cache-03  build cache-03
+      64.0 MiB  cache-04  build cache-04
+    … 53 more; --apply lists every target before confirmation.
+  Reported sizes may overlap; actual disk recovery can differ.
+
+  Next step       dclaude --space cache --apply
+  Details         dclaude --space cache --json
+
+Preview only — nothing deleted.
+```
+
+### Image deletion confirmation
+
+```bash
+dclaude --space images --keep 2 --apply
+```
+
+Apply lists every candidate and its full immutable ID; tagged targets list every
+alias, and dangling targets use the full ID. It never truncates the consent list.
+
+```text
+Docker storage
+  Disk used       29.9 GiB
+  Mac free        29.6 GiB
+
+Images
+  Removable       1 build
+  Kept            1 dclaude image — current launcher image
+                  1 dclaude image — keep-newest policy
+
+  Removable builds (Docker-reported sizes)
+       1.7 GiB  10d  dclaude:0.1.70
+      Image ID: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      Legacy tag — review ownership before deletion.
+
+
+Image deletion has no undo; a rebuild may produce a different image.
+Keep other Docker clients and older launchers idle during cleanup.
+Delete the 1 exact images candidate(s) listed above? Type yes: yes
+```
+
+### Cache deletion and measured recovery
+
+```bash
+dclaude --space cache --apply
+```
+
+This smaller example has two eligible records. A real apply lists all records,
+including those omitted from the five-row preview. Receipts use an absolute path.
+
+```text
+Docker storage
+  Disk used       29.9 GiB
+  Mac free        29.6 GiB
+
+Build cache
+  Needs review    2 unused private records
+  Reported size   96.0 MiB
+  Kept            1 shared, in-use or internal records
+
+  Exact cache targets
+      64.0 MiB  cache-a  build cache-a
+      32.0 MiB  cache-b  build cache-b
+  Reported sizes may overlap; actual disk recovery can differ.
+
+
+Builder-wide cache deletion: any project's next build may need downloads or recompilation.
+Keep other Docker clients and older launchers idle during cleanup.
+Delete the 2 exact cache candidate(s) listed above? Type yes: yes
+
+Cleanup complete
+  Disk change     96.0 MiB less allocated
+  Mac free change +95.0 MiB
+  Free-space changes include other host activity.
+  Receipt         ~/.local/state/dclaude/space/receipts/20260908T094500.json
+```
+
+### Verify later
+
+```bash
+dclaude --space verify
+```
+
+A negative free-space change stays negative; increased disk allocation is shown
+as “more allocated.” Missing measurements say “Unmeasured.” External-disk free
+space is reported separately from the Mac startup disk.
+
+```text
+Verification
+  Disk change     96.0 MiB less allocated
+  Mac free change +95.0 MiB
+  Free-space changes include other host activity.
+  Receipt         ~/.local/state/dclaude/space/receipts/20260908T094500.json
+```
+
+### Enable or inspect retention
+
+```bash
+dclaude --space retention enable --keep 2
+dclaude --space retention status
+```
+
+Both commands display the saved policy. Status does not change it.
+
+```text
+Image retention
+  Status          Enabled
+  Keep newest     2 distinct builds
+  Docker context  desktop-linux
+  Builder         desktop-linux
+
+Runs after successful build and startup. Only labelled dclaude images are eligible.
+Current images, container references and tags used elsewhere stay protected.
+  Details         dclaude --space retention status --json
+Native cache GC setup: docs/SPACE.md
+```
+
+### Disable retention
+
+```bash
+dclaude --space retention disable
+```
+
+```text
+Image retention disabled. Nothing deleted.
+```
+
+### Full detail and help
+
+```bash
+dclaude --space images --json
+dclaude --space cache --json
+dclaude --space verify --json
+dclaude --space retention status --json
+dclaude --space --help
+```
+
+Use `--json` when scripting: the default `verify` and `retention status` output is
+formatted for people. JSON fields and on-disk receipts preserve exact byte counts
+and complete metadata. The JSON schema and cleanup protections are unchanged.
 
 ## Clean up in two separate steps
 
@@ -149,8 +349,8 @@ The report keeps these views separate:
 
 Do not add image usage and cache usage to estimate a recovery total. The
 disk-image's allocated size is only a broad upper bound, not a useful forecast.
-The report preserves exact byte values; GB means 1,000,000,000 bytes and GiB means
-1,073,741,824 bytes.
+Terminal summaries use human-readable binary units (GiB = 1,073,741,824 bytes).
+JSON reports and receipts preserve exact byte values.
 
 For each cleanup step, the helper records a baseline, then samples the same
 disk-image identity and APFS counters for up to 60 seconds. **Observed free-space
@@ -282,20 +482,14 @@ result and its artifact to assess the complete run.
 
 ### Recorded recovery on Docker Desktop
 
-[CI run 34161861303](https://github.com/stanislavkozlovski/dclaude/actions/runs/34161861303)
-used Docker Desktop **4.89.0**, Engine **29.7.2**, Buildx
+[CI run 34163759065](https://github.com/stanislavkozlovski/dclaude/actions/runs/34163759065)
+passed all five jobs on Docker Desktop **4.89.0**, Engine **29.7.2**, Buildx
 **0.36.1-desktop.1**, and macOS **15.7.9**, with the containerd image store.
-Its image and cache cleanup stages measured these separate results:
-
-| Cleanup stage | `Docker.raw` allocated-byte reduction | Observed APFS free-byte change |
-| --- | ---: | ---: |
-| Images | 270,204,928 | +268,877,824 |
-| Cache | 875,442,176 | +874,074,112 |
-
-Image/container preservation, exact single-cache-ID selection, metadata checks,
-and policy checks passed. The run subsequently failed its final 284-image
-inventory check at a 30-second request timeout. Overall validation is determined
-by current CI, including its diagnosis-time assertion.
+The disposable cleanup fixture reduced `Docker.raw` allocation by **675,975,168
+bytes** (about 645 MiB); observed APFS free space increased by **674,816,000 bytes**.
+A complete inventory of **284 images and 21 stopped containers** took **29.83
+seconds**, below the one-minute requirement. The artifact includes separate image
+and cache receipts, exact-ID selection and parent preservation, and policy checks.
 
 These measurements establish recovery on the disposable fixture. Your Mac's
 versions, warm containers, snapshots, concurrent writes, and accumulated history

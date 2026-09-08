@@ -17,6 +17,7 @@ from pathlib import Path
 import platform
 import plistlib
 import re
+import shlex
 import socket
 import stat
 import subprocess
@@ -29,10 +30,7 @@ SCHEMA = 1
 LABEL = "com.dclaude.managed"
 RELEASE = re.compile(r"^dclaude:(\d+\.\d+\.\d+)$")
 IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
-GC_GUIDANCE = ('Docker Desktop → Settings → Docker Engine: merge '
-               '{"builder":{"gc":{"enabled":true,"defaultKeepStorage":"5GB"}}} '
-               'into existing settings. This is a builder-wide GC target, not a Docker '
-               'disk cap. This command does not edit settings or restart Docker.')
+
 
 
 class SpaceError(Exception):
@@ -513,49 +511,166 @@ def collect(docker, host, args, automatic=False):
     return dict(schema_version=SCHEMA, binding=docker.binding, inventory=inventory, plan=plan, host=measurement)
 
 
-def print_report(report, action):
-    plan = report["plan"]
-    print("Docker Desktop storage — active image store and selected default builder")
-    print("Image accounting and build-cache accounting overlap; neither is host free space.")
-    print("Docker image accounting uses each image's reported size below. Shared layer totals are unmeasured; do not add overlapping sizes.")
-    if action == "cache":
-        print(plan["note"])
-    for family in plan.get("families", []):
-        reason = "; ".join(family["reasons"]) or "eligible for explicit review"
-        print(f"  {family['id']} {', '.join(family['tags']) or '(dangling)'}: {family['size_bytes']} bytes — {reason}")
-        age_days = max(0, time.time() - family["created"]) / 86400
-        print(f"    created {age_days:.1f} days ago (Unix time {family['created']})")
-    if action == "images":
-        print("Using a deleted build again requires rebuilding. Rebuild duration and storage growth are unmeasured; mutable dependencies may produce a different image.")
-    print(f"Reviewed candidates: {len(plan['candidates'])}")
-    for candidate in plan["candidates"]:
-        print(f"  {candidate['id']} {candidate.get('targets', '')}: {candidate['size_bytes']} bytes")
-        if action == "cache":
-            print(f"    last used: {candidate['last_used']}; {candidate['description']}; parents: {candidate['parents']}")
-        elif candidate.get("legacy"):
-            print("    Legacy unlabelled exact release tag: ownership requires your manual review.")
-    for protected in plan.get("protected", []):
-        print(f"  protected cache {protected['id']}: {', '.join(protected['reasons'])} ({protected['size_bytes']} bytes)")
-    host = report["host"]
-    if host["disk_image"]:
-        raw = host["disk_image"]
-        print(f"Docker.raw: {raw['path']}\n  allocated: {raw['allocated_bytes']} bytes; apparent capacity: {raw['apparent_bytes']} bytes")
-        print("  Sparse allocation is approximate with APFS clones; allocation is counted once by file identity.")
+def human_bytes(value):
+    if value is None:
+        return "Unmeasured"
+    amount = abs(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if amount < 1024 or unit == "TiB":
+            return f"{amount:.0f} B" if unit == "B" else f"{amount:.1f} {unit}"
+        amount /= 1024
+
+
+def row(label, value):
+    print(f"  {label:<16}{value}")
+
+
+def kept_reason(family):
+    reasons = family["reasons"]
+    if any("container" in reason or "image mount" in reason for reason in reasons):
+        return "used by containers"
+    if "configured current launcher image" in reasons:
+        return "current launcher image"
+    if any(reason.startswith("newest ") for reason in reasons):
+        return "keep-newest policy"
+    if any("alias" in reason for reason in reasons):
+        return "tags used elsewhere"
+    return "needs inspection" if reasons else "cleanup blocked"
+
+
+def print_report(report, action, wrapper="dclaude", applying=False, disk_image=None):
+    plan, host = report["plan"], report["host"]
+    command = f"{wrapper} --space"
+    location = f" --disk-image {shlex.quote(str(disk_image))}" if disk_image else ""
+    print("Docker storage")
+    raw = host["disk_image"]
+    row("Disk used", human_bytes(raw["allocated_bytes"] if raw else None))
+    startup = next((c for c in host["containers"] if "startup" in c["roles"]), None)
+    row("Mac free", human_bytes(startup["free_bytes"] if startup else None))
     for container in host["containers"]:
-        print(f"APFS {container['uuid']} ({', '.join(container['roles'])}): {container['free_bytes']} free bytes")
-    for issue in plan["issues"] + host["issues"]:
-        print(f"UNMEASURED / BLOCKED: {issue}")
-    print("Containers and volumes are reference information only and are never deletion targets.")
-    print("Other Docker clients and older launchers must be idle during apply; Docker has no global mutation lock.")
+        if "docker" in container["roles"] and "startup" not in container["roles"]:
+            row("External free", human_bytes(container["free_bytes"]))
+
+    candidates = plan["candidates"]
+    if action == "images":
+        print("\nImages")
+        row("Removable", f"{len(candidates)} {'build' if len(candidates) == 1 else 'builds'}" if candidates else "None")
+        candidate_ids = {c["id"] for c in candidates}
+        groups = {}
+        for family in plan["families"]:
+            if family["id"] in candidate_ids:
+                continue
+            if family["owned"]:
+                category = "dclaude", kept_reason(family)
+            else:
+                category = ("other projects", "") if family["tags"] and all(not t.startswith("dclaude:") for t in family["tags"]) else ("unclassified", "")
+            groups[category] = groups.get(category, 0) + 1
+        for index, ((category, reason), count) in enumerate(sorted(groups.items(), key=lambda item: (item[0][0] != "dclaude", item[0]))):
+            noun = "image" if count == 1 else "images"
+            description = f"{count} dclaude {noun}" if category == "dclaude" else f"{count} {noun} ({category})"
+            row("Kept" if index == 0 else "", description + (f" — {reason}" if reason else ""))
+        if candidates:
+            print("\n  Removable builds (Docker-reported sizes)" if applying else "\n  Largest removable builds (Docker-reported sizes)")
+            families = {f["id"]: f for f in plan["families"]}
+            shown = candidates if applying else sorted(candidates, key=lambda c: c["size_bytes"], reverse=True)[:5]
+            for candidate in shown:
+                family = families[candidate["id"]]
+                name = ", ".join(family["tags"]) or f"<dangling {candidate['id'][7:19]}>"
+                age = max(0, time.time() - family["created"]) / 86400
+                print(f"    {human_bytes(candidate['size_bytes']):>10}  {age:.0f}d  {name}")
+                if applying:
+                    print(f"      Image ID: {candidate['id']}")
+                    if not family["tags"]:
+                        print(f"      Delete: {candidate['id']}")
+                if candidate.get("legacy"):
+                    print("      Legacy tag — review ownership before deletion.")
+            if len(shown) < len(candidates):
+                print(f"    … {len(candidates) - len(shown)} more; use --json for the full list.")
+
+    cache = plan if action == "cache" else report.get("cache_plan")
+    if cache is not None:
+        print("\nBuild cache")
+        records = cache["candidates"]
+        row("Needs review", f"{len(records)} unused private records" if records else "None")
+        row("Reported size", human_bytes(sum(c["size_bytes"] for c in records)))
+        row("Kept", f"{len(cache['protected'])} shared, in-use or internal records")
+        if action == "cache" and records:
+            print("\n  Exact cache targets" if applying else "\n  Largest unused records")
+            shown = records if applying else sorted(records, key=lambda c: c["size_bytes"], reverse=True)[:5]
+            for record in shown:
+                description = " ".join(record["description"].split())
+                if len(description) > 60:
+                    description = description[:57] + "…"
+                print(f"    {human_bytes(record['size_bytes']):>10}  {record['id']}  {description}")
+            if len(shown) < len(records):
+                print(f"    … {len(records) - len(shown)} more; --apply lists every target before confirmation.")
+        if records:
+            print("  Reported sizes may overlap; actual disk recovery can differ.")
+
+    print()
+    for issue in plan["issues"]:
+        missing = re.fullmatch(r"Configured current image (.+) is unresolved; build it before image cleanup\.", issue)
+        message = f"this checkout's image ({missing[1]}) is not built." if missing else issue
+        print(f"{'Image' if action == 'images' else 'Cache'} cleanup blocked: {message}")
+    for issue in host["issues"]:
+        print(f"Host measurement unavailable: {issue['message']}")
     if not host["complete"]:
-        print("Use --disk-image PATH for a moved Docker.raw. If access is denied, grant this terminal Full Disk Access in macOS settings; sudo is not a substitute.")
+        print("Check Docker.raw path and terminal access; use --disk-image PATH if the file moved.")
+    if cache is not None and action != "cache" and cache["issues"]:
+        for issue in cache["issues"]:
+            print(f"Cache cleanup blocked: {issue}")
+    if not applying:
+        if candidates and not plan["issues"] and host["complete"]:
+            keep = f" --keep {plan['keep']}" if action == "images" else ""
+            row("Next step", f"{command} {action}{keep}{location} --apply")
+        elif action == "images" and cache is not None and cache["candidates"] and not cache["issues"]:
+            row("Next step", f"{command} cache{location}")
+        keep = f" --keep {plan['keep']}" if action == "images" and plan["keep"] != 2 else ""
+        row("Details", f"{command} {action}{keep}{location} --json")
+        print("\nPreview only — nothing deleted.")
+
+
+def print_recovery(delta, receipt_path, wrapper, title="Verification"):
+    print(f"\n{title}")
+    if delta["measured"]:
+        change = delta["raw_allocated_bytes_reduction"]
+        row("Disk change", f"{human_bytes(change)} {'less' if change >= 0 else 'more'} allocated")
+        for container in delta["apfs"]:
+            free = container["free_bytes_delta"]
+            label = "Mac free change" if "startup" in container["roles"] else "External change"
+            row(label, f"{'+' if free >= 0 else '-'}{human_bytes(free)}")
+        print("  Free-space changes include other host activity.")
+        if not delta.get("recovery_observed"):
+            print("  Recovery not yet observed.")
+            row("Check later", f"{wrapper} --space verify")
+    else:
+        row("Disk change", "Unmeasured")
+        print(f"  {delta['reason']}")
+    row("Receipt", receipt_path)
+
+
+def print_policy(policy, wrapper):
+    print("Image retention")
+    row("Status", "Enabled" if policy and policy["enabled"] else "Disabled")
+    if policy:
+        row("Keep newest", f"{policy['keep']} distinct builds")
+        row("Docker context", policy["binding"]["context"])
+        row("Builder", policy["binding"]["builder"])
+    if policy and policy["enabled"]:
+        print("\nRuns after successful build and startup. Only labelled dclaude images are eligible.")
+        print("Current images, container references and tags used elsewhere stay protected.")
+    row("Details", f"{wrapper} --space retention status --json")
+    print("Native cache GC setup: docs/SPACE.md")
 
 
 def confirm(action, count):
     if not sys.stdin.isatty():
         raise SpaceError("--apply requires interactive confirmation in a terminal; --yes cannot authorize storage deletion.")
     if action == "cache":
-        print("BUILDER-WIDE CACHE DELETION: other projects may need to rebuild or download dependencies.")
+        print("\nBuilder-wide cache deletion: any project's next build may need downloads or recompilation.")
+    else:
+        print("\nImage deletion has no undo; a rebuild may produce a different image.")
+    print("Keep other Docker clients and older launchers idle during cleanup.")
     answer = input(f"Delete the {count} exact {action} candidate(s) listed above? Type yes: ")
     if answer != "yes":
         raise SpaceError("Cancelled; nothing deleted.")
@@ -619,7 +734,7 @@ def apply_cleanup(docker, host, args, directory, automatic=False):
         validate_latest(directory)
         report = collect(docker, host, args, automatic)
         if not automatic:
-            print_report(report, args.action)
+            print_report(report, args.action, args.wrapper, applying=True, disk_image=args.disk_image)
         if report["plan"]["issues"] or not report["host"]["complete"]:
             raise SpaceError("Cleanup blocked: complete image/cache and host baselines are required.")
         candidates = report["plan"]["candidates"]
@@ -730,12 +845,13 @@ def apply_cleanup(docker, host, args, directory, automatic=False):
             receipt["finished_at"] = now()
         save()
         if not automatic:
-            print(f"Receipt: {receipt_path}")
-            print(json.dumps(receipt["delta"], indent=2))
-            if not receipt["delta"].get("recovery_observed"):
-                print("Host recovery not yet observed. Run --space verify later; no shrink/restart was attempted.")
+            print_recovery(receipt["delta"], receipt_path, args.wrapper, "Cleanup complete")
+            skipped = sum(step["status"] == "skipped" for step in receipt["steps"])
+            if skipped:
+                row("Retained", f"{skipped} cache records still referenced by Docker")
             if args.action == "images":
-                print("Image references changed. Run --space cache for a fresh builder-wide cache review.")
+                location = f" --disk-image {shlex.quote(str(args.disk_image))}" if args.disk_image else ""
+                row("Next step", f"{args.wrapper} --space cache{location}")
         if automatic:
             pending = directory / "pending-build"
             if pending.read_text().strip() == pending_id:
@@ -752,7 +868,7 @@ def parser():
   cache --apply          Confirm separate builder-wide cache deletion.
   verify                 Remeasure the latest receipt; never delete anything.
   retention enable       Enable labelled-image retention after build/bootstrap.
-  retention status       Show the saved policy and native GC guidance.
+  retention status       Show the saved image policy.
   retention disable      Stop automatic image cleanup; retain all history.
 
 Requires host Python 3 and local macOS Docker Desktop with Engine API 1.48+
@@ -761,7 +877,9 @@ Runs before repository lookup, builds, updates, or agent startup. Ordinary
 launches need no new Python installation. --apply requires a terminal; --yes
 only authorizes launcher updates. Other Docker clients must be idle.
 For moved Docker.raw files use --disk-image PATH from Desktop Settings.
-See docs/SPACE.md for protections, receipts, APFS accounting, and GC guidance.""")
+Default output is a short summary; --json includes full IDs, references, and bytes.
+--apply lists every exact target before asking for confirmation.
+See docs/SPACE.md for examples, protections, receipts, and native cache GC setup.""")
     result.add_argument("action", nargs="?", choices=["images", "cache", "verify", "retention"], default="images")
     result.add_argument("retention_action", nargs="?", choices=["enable", "status", "disable"])
     result.add_argument("--keep", type=int, default=2, help="distinct newest launcher builds to preserve (default: 2; minimum: 1)")
@@ -804,11 +922,11 @@ def main(argv=None):
                         policy = load_policy(directory)
                         policy["enabled"] = False
                         write_json(directory / "policy.json", policy)
-                print("Retention disabled; images, cache, receipts, and native GC settings are unchanged.")
-            else:
+                print("Image retention disabled. Nothing deleted.")
+            elif args.json:
                 print(json.dumps(policy or dict(schema_version=SCHEMA, enabled=False), indent=2))
-            if not args.json:
-                print(GC_GUIDANCE)
+            else:
+                print_policy(policy, args.wrapper)
             return 0
         if args.action == "verify":
             latest = read_json(directory / "latest.json")
@@ -823,7 +941,10 @@ def main(argv=None):
             after = host.snapshot(Path(receipt["disk_image"]))
             result = dict(schema_version=SCHEMA, receipt=str(receipt_path), after=after,
                           delta=host_delta(receipt["baseline"], after))
-            print(json.dumps(result, indent=2))
+            if args.json:
+                print(json.dumps(result, indent=2))
+            else:
+                print_recovery(result["delta"], receipt_path, args.wrapper)
             return 0 if result["delta"]["measured"] else 2
         docker = Docker()
         if args.action in ("images", "cache") and not args.apply and not args.auto_retain:
@@ -851,11 +972,7 @@ def main(argv=None):
                 policy = dict(schema_version=SCHEMA, enabled=True, keep=args.keep, repository="dclaude",
                               binding=docker.binding, disk_image=baseline["disk_image"]["path"], updated_at=now())
                 write_json(directory / "policy.json", policy)
-            print("Retention enabled for labelled default dclaude builds after successful build and bootstrap. It never prunes cache or legacy unlabelled images.")
-            print(f"Keep the newest {policy['keep']} distinct builds, plus the current image, all container references, and non-release or other-repository aliases.")
-            print(f"Bound to context {docker.binding['context']}, builder {docker.binding['builder']}, daemon {docker.binding['daemon_id']} (store {docker.binding['driver']}).")
-            print(f"Disk image: {policy['disk_image']}")
-            print(GC_GUIDANCE)
+            print_policy(policy, args.wrapper)
             return 0
         if args.auto_retain:
             policy = load_policy(directory)
@@ -873,10 +990,7 @@ def main(argv=None):
             if args.json:
                 print(json.dumps(report, indent=2, sort_keys=True))
             else:
-                print_report(report, args.action)
-                if args.action != "cache":
-                    print(f"Private unused cache records: {len(report['cache_plan']['candidates'])}; protected records: {len(report['cache_plan']['protected'])}. Run --space cache for IDs and relationships.")
-                print("Preview only. Use images --apply or cache --apply for separate explicit review.")
+                print_report(report, args.action, args.wrapper, disk_image=args.disk_image)
         return 0
     except (SpaceError, OSError, ValueError, KeyError, TypeError) as exc:
         if args.json:

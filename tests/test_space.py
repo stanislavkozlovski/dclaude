@@ -968,7 +968,7 @@ class CommandTests(SpaceFixture):
         space.write_json(path, receipt)
         self.docker.deleted.clear()
         self.output = io.StringIO()
-        self.assertEqual(self.run_main("verify"), 0)
+        self.assertEqual(self.run_main("verify", "--json"), 0)
         self.assertTrue(json.loads(self.output.getvalue())["delta"]["measured"])
         self.assertEqual(self.docker.deleted, [])
 

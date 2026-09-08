@@ -360,7 +360,8 @@ def main():
             assert image_id(tag) == ident
         assert command("docker", "inspect", "--format", "{{.Image}}", container_id).strip() == stopped
 
-        verification = json.loads(space("verify"))
+        assert "Verification" in space("verify")
+        verification = json.loads(space("verify", "--json"))
         assert verification["delta"]["measured"], verification
         EVIDENCE["verification"] = verification
         # Receipts may observe concurrent host writes. Require an actual sparse
@@ -378,7 +379,8 @@ def main():
         space("retention", "enable", "--keep", "2", confirm=True)
         policy = json.loads((state / "policy.json").read_text())
         assert policy["enabled"] and policy["keep"] == 2 and policy["repository"] == "dclaude", policy
-        assert "true" in space("retention", "status")
+        assert "Enabled" in space("retention", "status")
+        assert json.loads(space("retention", "status", "--json"))["enabled"] is True
         space("retention", "disable")
         disabled = json.loads((state / "policy.json").read_text())
         assert disabled["enabled"] is False
