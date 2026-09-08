@@ -353,6 +353,15 @@ perform_tool_update claude
         self.assertNotIn("docker <build>", self.calls())
         self.assertEqual((lock / "owner").read_text(), "123456789\n")
 
+    def test_owner_write_failure_removes_partial_shell_lock(self):
+        result = self.run_shell("""
+printf() { unset -f printf; return 1; }
+acquire_space_lock
+""")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot record Docker space lock owner", result.stderr)
+        self.assertFalse((self.state / "operation.lock").exists())
+
     def test_symlinked_state_is_rejected(self):
         self.state.parent.mkdir(parents=True)
         elsewhere = self.directory / "elsewhere"

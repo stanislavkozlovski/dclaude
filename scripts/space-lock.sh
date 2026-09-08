@@ -24,6 +24,7 @@ acquire_space_lock() {
     sleep 1
   done
   if ! printf '%s\n' "$$" > "$SPACE_STATE_DIR/operation.lock/owner"; then
+    rm -f "$SPACE_STATE_DIR/operation.lock/owner" 2>/dev/null || true
     rmdir "$SPACE_STATE_DIR/operation.lock" 2>/dev/null || true
     die "cannot record Docker space lock owner"
   fi
