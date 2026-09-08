@@ -36,7 +36,7 @@ Disk Access.
 ## CLI output examples
 
 Examples use illustrative fixtures. Every human response follows Result →
-measurements or policy → Issues, when present → Next. Suggestions depend on the
+measurements or policy → Note and Issues, when present → Next. Suggestions depend on the
 observed state and preserve the wrapper, keep count, and explicit disk-image path.
 
 ### Image overview
@@ -48,7 +48,7 @@ dclaude --space
 
 ```text
 Result
-  Preview only; cleanup is blocked.
+  Nothing to remove. Both dclaude images are used by containers.
 
 Docker storage
   Disk used       29.9 GiB
@@ -65,9 +65,8 @@ Build cache
   Kept            9 shared, in-use or internal records
   Reported sizes may overlap; actual disk recovery can differ.
 
-Issues
-  Image cleanup requires dclaude:0.1.85, which is not built.
-  Building it will not release images used by containers.
+Note
+  This checkout expects dclaude:0.1.85, which is not built.
 
 Next
   Review unused build cache:
@@ -76,7 +75,7 @@ Next
     dclaude --space images --keep 2 --json
 ```
 
-### Blocked image apply
+### Nothing to remove, even when this version is not built
 
 ```bash
 dclaude --space images --keep 2 --apply
@@ -84,7 +83,7 @@ dclaude --space images --keep 2 --apply
 
 ```text
 Result
-  Cleanup blocked; nothing deleted.
+  Nothing to remove. Both dclaude images are used by containers.
 
 Docker storage
   Disk used       29.9 GiB
@@ -101,9 +100,8 @@ Build cache
   Kept            9 shared, in-use or internal records
   Reported sizes may overlap; actual disk recovery can differ.
 
-Issues
-  Image cleanup requires dclaude:0.1.85, which is not built.
-  Building it will not release images used by containers.
+Note
+  This checkout expects dclaude:0.1.85, which is not built.
 
 Next
   Review unused build cache:
@@ -112,9 +110,15 @@ Next
     dclaude --space images --keep 2 --json
 ```
 
-A missing configured image still blocks deletion and returns exit code 2.
-The specific issue is printed once. Building that image does not release existing
-container references. No deletion rule or JSON field changes in this update.
+This apply exits successfully without confirmation or a receipt: nothing is eligible.
+A missing expected image is a note, also available in JSON as `plan.notes`; it does
+not prevent removing eligible old builds. Building the expected version would not
+release existing container protections. Running and stopped containers, image
+mounts, and the newest builds remain protected.
+
+Incomplete image inventory or unknown container references still block deletion.
+Actual deletion also requires complete host measurements; an empty cleanup does
+not require a disk baseline.
 
 ### Cache preview
 

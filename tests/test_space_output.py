@@ -14,7 +14,7 @@ def render(function, *args, **kwargs):
     return output.getvalue()
 
 
-def blocked_report():
+def missing_image_report():
     """The user's four-image report, with illustrative cache sizes."""
     images = [image("a", "0.1.81", created=1788416279, Size=1859748430),
               image("b", "0.1.76", created=1787821780, Size=1879354212),
@@ -30,17 +30,17 @@ def blocked_report():
 
 class OutputTests(unittest.TestCase):
     def test_user_report_is_short_and_has_an_actionable_cache_summary(self):
-        output = render(space.print_report, blocked_report(), "images")
+        output = render(space.print_report, missing_image_report(), "images")
         for text in ("29.9 GiB", "29.6 GiB", "2 dclaude images — used by containers",
                      "2 images (other projects)", "58 unused private records", "3.6 GiB",
-                     "Image cleanup requires dclaude:0.1.85, which is not built.", "dclaude --space cache"):
+                     "This checkout expects dclaude:0.1.85, which is not built.", "dclaude --space cache"):
             self.assertIn(text, output)
         for noise in ("sha256:", "Unix time", "apfs-1", "32058363904", "{'", "--apply"):
             self.assertNotIn(noise, output)
         self.assertLessEqual(len(output.splitlines()), 30)
 
     def test_cache_preview_is_bounded_but_apply_shows_every_exact_record(self):
-        report = blocked_report()
+        report = missing_image_report()
         report["plan"] = report["cache_plan"]
         preview = render(space.print_report, report, "cache", wrapper="dcodex")
         self.assertIn("53 more", preview)
@@ -64,7 +64,7 @@ class OutputTests(unittest.TestCase):
         self.assertNotIn("…", output)
 
     def test_unknown_measurement_is_not_zero_and_external_space_is_separate(self):
-        report = blocked_report()
+        report = missing_image_report()
         report["host"] = measurement(disk_image=None, complete=False,
                                      issues=[dict(message="Permission denied: /Docker.raw")])
         report["host"]["containers"] = [dict(roles=["docker"], free_bytes=10 * 1024 ** 3)]
@@ -98,7 +98,7 @@ class OutputTests(unittest.TestCase):
         self.assertNotIn("{", enabled)
 
     def test_followup_commands_preserve_keep_and_quote_a_moved_disk_path(self):
-        report = blocked_report()
+        report = missing_image_report()
         report["plan"]["keep"] = 4
         output = render(space.print_report, report, "images", wrapper="dcodex",
                         disk_image="/Volumes/External Disk/Docker.raw")
@@ -116,14 +116,14 @@ class NextActionTests(unittest.TestCase):
         self.assertFalse(any("--apply" in command for _, command in space.next_actions("dcodex", "images", report=report)))
 
     def test_no_candidates_offers_details_without_inventing_cache_work(self):
-        report = blocked_report()
+        report = missing_image_report()
         report["plan"]["issues"] = []
         report["cache_plan"]["candidates"] = []
         hints = space.next_actions("dclaude", "images", report=report)
         self.assertEqual(len(hints), 1)
         self.assertTrue(hints[0][1].endswith("--json"))
         output = render(space.print_report, report, "images")
-        self.assertIn("No images eligible for cleanup", output)
+        self.assertIn("Nothing to remove.", output)
         self.assertNotIn("\nIssues", output)
 
     def test_recovery_prioritizes_verify_then_fresh_cache_and_preserves_scope(self):
@@ -141,7 +141,9 @@ class NextActionTests(unittest.TestCase):
         self.assertEqual(hints, [("Inspect recovery measurements", "dclaude --space verify --json")])
 
     def test_section_order_and_single_next_section(self):
-        output = render(space.print_report, blocked_report(), "images", applying=True)
+        report = missing_image_report()
+        report["plan"]["issues"] = ["A container image reference is unresolved."]
+        output = render(space.print_report, report, "images", applying=True)
         self.assertLess(output.index("Result"), output.index("Docker storage"))
         self.assertLess(output.index("Docker storage"), output.index("\nIssues"))
         self.assertLess(output.index("\nIssues"), output.index("\nNext"))

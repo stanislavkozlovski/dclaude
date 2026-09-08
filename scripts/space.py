@@ -289,6 +289,7 @@ def image_plan(inventory, current_image, keep=2, automatic=False):
     """Group aliases by immutable ID; unresolved graph edges veto mutation."""
     families = {}
     issues = []
+    notes = []
     for item in inventory["images"]:
         ident = item.get("Id")
         if not isinstance(ident, str) or not IMAGE_ID.fullmatch(ident):
@@ -330,10 +331,11 @@ def image_plan(inventory, current_image, keep=2, automatic=False):
             family["reasons"].append("overlapping image families require manual inspection")
     aliases = {tag: family for family in families.values() for tag in family["tags"] + family["digests"]}
     current = families.get(current_image) or aliases.get(current_image)
-    if not current:
-        issues.append(f"Configured current image {current_image} is unresolved; build it before image cleanup.")
-    else:
-        current["reasons"].append("configured current launcher image")
+    current_families = [current] if current else [f for f in families.values() if current_image in f["members"]]
+    if not current_families:
+        notes.append(f"This checkout expects {current_image}, which is not built.")
+    for family in current_families:
+        family["reasons"].append("configured current launcher image")
     referenced = set()
     for container in inventory["containers"]:
         ident = container.get("Image")
@@ -388,7 +390,7 @@ def image_plan(inventory, current_image, keep=2, automatic=False):
             targets = family["tags"] or [family["id"]]
             candidates.append(dict(id=family["id"], targets=targets, size_bytes=family["size_bytes"],
                                    legacy=not family["labelled"], members=family["members"]))
-    return dict(candidates=candidates, families=list(families.values()), issues=sorted(set(issues)), keep=keep)
+    return dict(candidates=candidates, families=list(families.values()), issues=sorted(set(issues)), notes=notes, keep=keep)
 
 
 def cache_plan(inventory):
@@ -583,11 +585,15 @@ class ReportedError(SpaceError):
 
 def print_report(report, action, wrapper="dclaude", applying=False, disk_image=None):
     plan, host = report["plan"], report["host"]
-    blocked = bool(plan["issues"] or not host["complete"])
+    blocked = bool(plan["issues"] or (plan["candidates"] and not host["complete"]))
     if blocked:
         result = "Cleanup blocked; nothing deleted." if applying else "Preview only; cleanup is blocked."
     elif not plan["candidates"]:
-        result = "Nothing to clean." if action == "cache" else "No images eligible for cleanup."
+        result = "Nothing to remove."
+        if action == "images":
+            launcher = [family for family in plan["families"] if family["owned"]]
+            if launcher and all(kept_reason(family) == "used by containers" for family in launcher):
+                result += " Both dclaude images are used by containers." if len(launcher) == 2 else " All dclaude images are used by containers."
     else:
         result = f"{'Review' if applying else 'Preview'} {len(plan['candidates'])} {action} candidates; nothing deleted."
     print_result(result)
@@ -656,14 +662,11 @@ def print_report(report, action, wrapper="dclaude", applying=False, disk_image=N
         if records:
             print("  Reported sizes may overlap; actual disk recovery can differ.")
 
-    issues = []
-    for issue in plan["issues"]:
-        missing = re.fullmatch(r"Configured current image (.+) is unresolved; build it before image cleanup\.", issue)
-        if missing:
-            issues.append(f"Image cleanup requires {missing[1]}, which is not built.")
-            issues.append("Building it will not release images used by containers.")
-        else:
-            issues.append(issue)
+    if plan.get("notes"):
+        print("\nNote")
+        for note in plan["notes"]:
+            print(f"  {note}")
+    issues = list(plan["issues"])
     issues.extend(issue["message"] for issue in host["issues"])
     if not host["complete"]:
         issues.append("Check Docker.raw path and terminal access; use --disk-image PATH if the file moved.")
@@ -796,10 +799,10 @@ def apply_cleanup(docker, host, args, directory, automatic=False):
                 except SpaceError as exc:
                     report["cache_plan"] = dict(candidates=[], protected=[], issues=[str(exc)])
             print_report(report, args.action, args.wrapper, applying=True, disk_image=args.disk_image)
-        if report["plan"]["issues"] or not report["host"]["complete"]:
+        candidates = report["plan"]["candidates"]
+        if report["plan"]["issues"] or (candidates and not report["host"]["complete"]):
             error = SpaceError if automatic else ReportedError
             raise error("Cleanup blocked: complete image/cache and host baselines are required.")
-        candidates = report["plan"]["candidates"]
         if not candidates:
             if automatic:
                 (directory / "pending-build").unlink()

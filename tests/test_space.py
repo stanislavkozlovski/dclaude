@@ -165,10 +165,20 @@ class ImagePlanningTests(unittest.TestCase):
                 self.assertTrue(plan["issues"])
                 self.assertEqual(plan["candidates"], [])
 
-    def test_missing_current_image_disables_cleanup(self):
+    def test_missing_current_image_is_a_note_and_preserves_newest(self):
         plan = space.image_plan(inventory(), "dclaude:missing", 1)
+        self.assertEqual([c["id"] for c in plan["candidates"]], [ident("a")])
+        self.assertEqual(plan["issues"], [])
+        self.assertEqual(plan["notes"], ["This checkout expects dclaude:missing, which is not built."])
+
+    def test_current_manifest_member_protects_its_existing_family(self):
+        contents = inventory([
+            image("a", "0.0.1", Manifests=[dict(ID=ident("b"), Available=True, Kind="image")]),
+            image("f", "0.0.9", created=9)])
+        plan = space.image_plan(contents, ident("b"), 1)
         self.assertEqual(plan["candidates"], [])
-        self.assertIn("unresolved", plan["issues"][0])
+        self.assertEqual(plan["notes"], [])
+        self.assertIn("configured current launcher image", plan["families"][0]["reasons"])
 
     def test_nonrelease_and_foreign_aliases_protect_the_whole_identity(self):
         for alias in ("dclaude:latest", "personal:0.0.1", "dclaude:1.2.3-beta"):
@@ -915,16 +925,52 @@ class CommandTests(SpaceFixture):
                 contextlib.redirect_stderr(self.output):
             return space.main(["--current-image", "dclaude:0.0.9", *args])
 
-    def test_blocked_apply_explains_issue_once_and_preserves_guard(self):
-        self.docker.contents["images"] = self.docker.contents["images"][:1]
-        self.assertEqual(self.run_main("images", "--apply"), 2)
+    def test_missing_current_with_container_protections_is_successful_noop(self):
+        self.docker.contents = inventory(
+            [image("a", "0.1.81"), image("b", "0.1.76")],
+            [dict(Image=ident("a")), dict(Image=ident("b"), State=dict(Running=False))])
+        self.assertEqual(self.run_main("images", "--apply"), 0)
         output = self.output.getvalue()
-        self.assertIn("Image cleanup requires dclaude:0.0.9", output)
-        self.assertIn("Building it will not release images used by containers", output)
-        self.assertNotIn("complete image/cache and host baselines", output)
+        self.assertIn("Nothing to remove. Both dclaude images are used by containers.", output)
+        self.assertIn("This checkout expects dclaude:0.0.9, which is not built.", output)
+        self.assertNotIn("\nIssues", output)
         self.assertEqual(output.count("\nNext\n"), 1)
+        self.confirm_mock.assert_not_called()
         self.assertEqual(self.docker.deleted, [])
         self.assertFalse((self.directory / "latest.json").exists())
+
+    def test_missing_current_still_allows_confirmed_eligible_deletion(self):
+        self.docker.contents = inventory([
+            image("a", "0.0.1"), image("b", "0.0.2", created=2),
+            image("c", "0.0.3", created=3)])
+        self.assertEqual(self.run_main("images", "--keep", "2", "--apply"), 0)
+        self.confirm_mock.assert_called_once()
+        self.assertEqual(self.docker.deleted, ["dclaude:0.0.1"])
+        self.assertTrue((self.directory / "latest.json").exists())
+
+    def test_missing_current_does_not_bypass_unknown_container_reference(self):
+        self.docker.contents = inventory([image("a", "0.0.1")], [dict(Image=ident("b"))])
+        self.assertEqual(self.run_main("images", "--apply"), 2)
+        self.assertIn("\nIssues", self.output.getvalue())
+        self.confirm_mock.assert_not_called()
+        self.assertEqual(self.docker.deleted, [])
+
+    def test_empty_inventory_needs_no_host_baseline_or_confirmation(self):
+        self.docker.contents = inventory([])
+        self.host.hook = lambda count, result: measurement(complete=False)
+        self.assertEqual(self.run_main("images", "--apply"), 0)
+        self.assertIn("Nothing to remove.", self.output.getvalue())
+        self.confirm_mock.assert_not_called()
+        self.assertEqual(self.docker.deleted, [])
+        self.assertFalse((self.directory / "latest.json").exists())
+
+    def test_missing_current_json_separates_notes_from_blockers(self):
+        self.docker.contents = inventory([])
+        self.assertEqual(self.run_main("images", "--json"), 0)
+        report = json.loads(self.output.getvalue())
+        self.assertEqual(report["plan"]["issues"], [])
+        self.assertEqual(report["plan"]["notes"], ["This checkout expects dclaude:0.0.9, which is not built."])
+        self.assertFalse(self.directory.exists())
 
     def test_json_preview_is_readonly_and_machine_parseable(self):
         self.assertEqual(self.run_main("--json"), 0)
