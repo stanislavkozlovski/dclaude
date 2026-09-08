@@ -89,8 +89,9 @@ class OutputTests(unittest.TestCase):
 
     def test_retention_status_is_readable_with_and_without_a_saved_policy(self):
         default = render(space.print_policy, None, "dclaude")
-        for text in ("Image retention enabled.", "Enabled (default)", "2 distinct builds", "once a day", "build cache"):
+        for text in ("Image retention disabled.", "Disabled (not configured)", "2 distinct builds"):
             self.assertIn(text, default)
+        self.assertNotIn("Runs after", default)
         self.assertNotIn("Docker context", default)
         disabled = render(space.print_policy, dict(enabled=False, keep=2, binding={}), "dclaude")
         self.assertIn("Image retention disabled.", disabled)
@@ -98,9 +99,11 @@ class OutputTests(unittest.TestCase):
         self.assertNotIn("Runs after", disabled)
         policy = dict(enabled=True, keep=4, binding=dict(context="desktop-linux", builder="default"))
         enabled = render(space.print_policy, policy, "dclaude")
-        for text in ("Status          Enabled\n", "4 distinct builds", "desktop-linux", "default", "status --json"):
+        for text in ("Status          Enabled\n", "4 distinct builds", "desktop-linux", "default",
+                     "after a launcher image build", "status --json"):
             self.assertIn(text, enabled)
-        self.assertNotIn("(default)", enabled)
+        self.assertNotIn("build cache", enabled)
+        self.assertNotIn("(not configured)", enabled)
         self.assertNotIn("{", enabled)
 
     def test_followup_commands_preserve_keep_and_quote_a_moved_disk_path(self):

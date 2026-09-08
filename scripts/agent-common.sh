@@ -66,7 +66,7 @@ Options:
   --ssh      forward the host SSH agent socket and known_hosts when available
   --profile NAME  use a named Codex profile (separate ~/.codex-NAME directory)
   --list-profiles  list available Codex profiles
-  --space    diagnose Docker storage; preview images/cache and manage automatic image retention
+  --space    diagnose Docker storage; preview images/cache and manage opt-in image retention
   --help     show this wrapper help
   --version  show the wrapper version
 
@@ -89,9 +89,9 @@ Examples:
   $tool --space retention status
   $tool --space --help
 
-Old launcher builds and the build cache they held are retired automatically after
-each image build and at most once a day on launch; the newest 2 builds stay.
-Manage it with "$tool --space retention status|enable --keep N|disable".
+Enable automatic image retention with "$tool --space retention enable --keep N".
+It then retires old labelled images after successful builds; cache cleanup stays manual.
+Inspect or stop it with "$tool --space retention status|disable".
 Storage commands run on the host, outside any repository, and require Python 3.
 Manual cleanup requires its own confirmation; --yes only authorizes updates.
 Run "$tool --space --help" for the complete command guide. See $TOOL_HOME/docs/SPACE.md.
@@ -118,7 +118,7 @@ dispatch_space() {
   shift
   for argument in "$@"; do
     case "$argument" in
-      --tool-home|--tool-home=*|--current-image|--current-image=*|--wrapper|--wrapper=*|--auto-retain|--auto-retain=*)
+      --current-image|--current-image=*|--wrapper|--wrapper=*|--auto-retain|--auto-retain=*)
         die "$argument is an internal Docker space option and cannot be supplied through the wrapper"
         ;;
       --ssh|--rebuild|--reset|--stop|--check-update|--update-launcher|--update-tool|--yes|--profile|--profile=*|--list-profiles|--version|-v|--space)
@@ -128,7 +128,7 @@ dispatch_space() {
   done
   ensure_command python3
   exec python3 "$TOOL_HOME/scripts/space.py" \
-    --tool-home "$TOOL_HOME" --current-image "$DCLAUDE_IMAGE_NAME" \
+    --current-image "$DCLAUDE_IMAGE_NAME" \
     --wrapper "$WRAPPER_NAME" "$@"
 }
 
@@ -1130,69 +1130,32 @@ build_image() {
   fi
 }
 
-retention_sweep_due() {
-  local stamp="$SPACE_STATE_DIR/retention-check"
-  local checked_at
-  local interval
-  local now
-
-  interval="${DCLAUDE_RETENTION_INTERVAL_SECONDS:-86400}"
-  [[ "$interval" =~ ^[0-9]+$ ]] || interval=86400
-  [ "$interval" -gt 0 ] || return 1
-  [ -f "$stamp" ] || return 0
-  checked_at="$(sed -n '1p' "$stamp" 2>/dev/null || true)"
-  [[ "$checked_at" =~ ^[0-9]+$ ]] || return 0
-  now="$(date +%s)"
-  [ $((now - checked_at)) -ge "$interval" ]
-}
-
-mark_retention_checked() {
-  local stamp="$SPACE_STATE_DIR/retention-check"
-
-  if ! (umask 077; date +%s > "$stamp.$$") || ! mv "$stamp.$$" "$stamp"; then
-    rm -f "$stamp.$$"
-    echo "warning: could not record the automatic image retention check time" >&2
-  fi
-}
-
 maybe_retain_images() {
   local pending_id
   local current_id
-  local trigger=""
 
   [ "$DCLAUDE_IMAGE_IS_DEFAULT" -eq 1 ] || return 0
   [ -z "${BUILDX_BUILDER:-}" ] && [ "${DOCKER_BUILDKIT:-1}" != "0" ] || return 0
-  # Retention is on unless the saved policy turns it off. This cheap check
-  # keeps Python out of launches that must not clean anything; the helper
-  # still validates the complete policy itself.
-  if [ -f "$SPACE_STATE_DIR/policy.json" ] &&
-    grep -Eq '"enabled"[[:space:]]*:[[:space:]]*false([[:space:]]*[,}]|[[:space:]]*$)' "$SPACE_STATE_DIR/policy.json"; then
+  # Only a saved enabled policy grants automatic deletion authority. The
+  # helper validates the complete policy again while holding the shared lock.
+  [ -f "$SPACE_STATE_DIR/policy.json" ] || return 0
+  grep -Eq '"enabled"[[:space:]]*:[[:space:]]*true([[:space:]]*[,}]|[[:space:]]*$)' \
+    "$SPACE_STATE_DIR/policy.json" || return 0
+  [ -f "$SPACE_STATE_DIR/pending-build" ] || return 0
+  if ! pending_id="$(cat "$SPACE_STATE_DIR/pending-build" 2>/dev/null)" ||
+    ! current_id="$(docker image inspect --format '{{.Id}}' "$DCLAUDE_IMAGE_NAME" 2>/dev/null)"; then
+    echo "warning: automatic image retention skipped: completed build identity could not be verified" >&2
     return 0
   fi
-  # A completed launcher build runs retention right away. Otherwise a sweep
-  # runs at most once per interval so space still returns after builds that
-  # ended without a launch or cleanups that were blocked at the time.
-  if [ -f "$SPACE_STATE_DIR/pending-build" ]; then
-    if ! pending_id="$(cat "$SPACE_STATE_DIR/pending-build" 2>/dev/null)" ||
-      ! current_id="$(docker image inspect --format '{{.Id}}' "$DCLAUDE_IMAGE_NAME" 2>/dev/null)"; then
-      echo "warning: automatic image retention skipped: completed build identity could not be verified" >&2
-      return 0
-    fi
-    [ "$pending_id" != "$current_id" ] || trigger="build"
-  fi
-  if [ -z "$trigger" ]; then
-    retention_sweep_due || return 0
-    trigger="sweep"
-  fi
-  mark_retention_checked
+  [ "$pending_id" = "$current_id" ] || return 0
   if ! command -v python3 >/dev/null 2>&1; then
     echo "warning: automatic image retention skipped: host Python 3 is unavailable" >&2
     return 0
   fi
   if ! python3 "$TOOL_HOME/scripts/space.py" \
-    --tool-home "$TOOL_HOME" --current-image "$DCLAUDE_IMAGE_NAME" \
+    --current-image "$DCLAUDE_IMAGE_NAME" \
     --wrapper "$WRAPPER_NAME" --auto-retain; then
-    echo "warning: automatic image retention ($trigger) did not complete; continuing agent launch (see $WRAPPER_NAME --space retention status)" >&2
+    echo "warning: automatic image retention did not complete; continuing agent launch (see $WRAPPER_NAME --space retention status)" >&2
   fi
 }
 

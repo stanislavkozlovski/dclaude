@@ -49,7 +49,7 @@ def command(*args, timeout=180):
 
 def space(*args, confirm=False, timeout=600):
     argv = [sys.executable, str(ROOT / "scripts/space.py"),
-            "--current-image", CURRENT, "--tool-home", str(ROOT),
+            "--current-image", CURRENT,
             "--wrapper", "dclaude", *args]
     if not confirm:
         return command(*argv, timeout=timeout)
@@ -189,19 +189,21 @@ def prove_exact_cache_selection(helper, report):
 
 def prove_automatic_retention(engine, context, state, container_id, stopped, protected_tags, retired):
     """The launcher's automatic path on real Desktop data: the newest two labelled
-    builds stay, older labelled builds go, and only the cache they held follows."""
+    builds stay, old labelled builds go, and builder-wide cache remains explicit."""
     global CURRENT
     newer = make_image(context, "90.0.7", 8)
     newest = make_image(context, "90.0.8", 8)
     CURRENT = "dclaude:90.0.8"
     kept = {tag: ident for tag, ident in protected_tags.items() if tag not in retired}
     kept.update({"dclaude:90.0.7": newer, CURRENT: newest})
+    disabled = json.loads(space("retention", "status", "--json"))
+    assert disabled["enabled"] is False and disabled["saved"] is False, disabled
+    space("retention", "enable", "--keep", "2")
     status = json.loads(space("retention", "status", "--json"))
-    assert status["enabled"] is True and status["keep"] == 2 and status["saved"] is False, status
-    assert not (state / "policy.json").exists(), "Default retention must not need a saved policy"
+    assert status["enabled"] is True and status["keep"] == 2 and status["saved"] is True, status
     before = engine.inventory()
-    shared_before = {record["ID"] for record in before["cache"] if record["Shared"]}
-    unshared_before = {record["ID"] for record in before["cache"] if not record["Shared"]}
+    cache_ids_before = {record["ID"] for record in before["cache"]}
+    receipts_before = set((state / "receipts").glob("*.json"))
     (state / "pending-build").write_text(newest + "\n")
     output = space("--auto-retain")
     assert "Retention removed 2 old dclaude builds" in output, output
@@ -212,26 +214,21 @@ def prove_automatic_retention(engine, context, state, container_id, stopped, pro
     for tag, ident in kept.items():
         assert image_id(tag) == ident, f"Protected alias changed during automatic retention: {tag}"
     assert command("docker", "inspect", "--format", "{{.Image}}", container_id).strip() == stopped
-    cache_receipt = latest_receipt()
-    assert cache_receipt["action"] == "cache", cache_receipt["action"]
-    assert cache_receipt["authority"] == "build cache released by automatic image retention", cache_receipt["authority"]
-    assert all(step["status"] == "completed" for step in cache_receipt["steps"]), cache_receipt["steps"]
-    images_receipt = json.loads(Path(cache_receipt["released_by_receipt"]).read_text())
+    images_receipt = latest_receipt()
     assert images_receipt["action"] == "images" and images_receipt["status"] == "completed", images_receipt
+    assert images_receipt["authority"] == "enabled retention policy", images_receipt["authority"]
+    assert all(step["status"] == "completed" for step in images_receipt["steps"]), images_receipt["steps"]
     assert {candidate["id"] for candidate in images_receipt["reviewed"]} == set(retired.values()), images_receipt["reviewed"]
-    released = images_receipt["released_cache"]
     after_ids = {record["ID"] for record in after["cache"]}
-    assert released and set(released) <= shared_before, (released, shared_before)
-    assert not set(released) & after_ids, "Released cache records must be gone"
-    assert unshared_before <= after_ids, "Cache that was already private is outside automatic cleanup"
-    assert any(record["Shared"] for record in after["cache"]), "Cache held by remaining images must stay shared"
-    assert f"Retention cleared {len(released)} build-cache record" in output, output
+    assert after_ids == cache_ids_before, "Automatic image retention must not prune builder-wide cache"
+    assert "Retention cleared" not in output, output
+    assert len(set((state / "receipts").glob("*.json")) - receipts_before) == 1
     remaining = diagnosis()
     assert not remaining["plan"]["candidates"], remaining["plan"]["candidates"]
     EVIDENCE["automatic_retention"] = {
-        "output": output, "retired": retired, "kept": kept, "released_cache": released,
-        "images_receipt": images_receipt, "cache_receipt": cache_receipt,
-        "shared_records_before": len(shared_before), "records_after": len(after_ids),
+        "output": output, "retired": retired, "kept": kept,
+        "images_receipt": images_receipt,
+        "cache_records_preserved": len(after_ids),
     }
 
 
@@ -426,7 +423,7 @@ def main():
 
         prove_automatic_retention(engine, context, state, container_id, stopped, protected_tags,
                                   {"dclaude:90.0.5": recent, "dclaude:90.0.6": current})
-        phase("automatic retention retired old labelled builds and only the cache they held")
+        phase("opt-in automatic retention retired old labelled builds and preserved cache")
 
         space("retention", "enable", "--keep", "2", confirm=True)
         policy = json.loads((state / "policy.json").read_text())

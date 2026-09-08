@@ -276,7 +276,7 @@ class Docker:
         if not isinstance(images, list) or not isinstance(inspected, list) or ("BuildCache" not in disk or (disk["BuildCache"] is not None and not isinstance(disk["BuildCache"], list))):
             raise SpaceError("Incomplete Docker inventory; mutation disabled.")
         return dict(images=images, containers=inspected, cache=disk["BuildCache"] or [],
-                    layers_size=None, binding=self.binding, measured_at=now())
+                    measured_at=now())
 
     def delete_image(self, target):
         return self.api("DELETE", f"/images/{quote(target, safe='')}", dict(force="false", noprune="true"))
@@ -402,8 +402,13 @@ def cache_plan(inventory):
         if type(record.get("InUse")) is not bool or type(record.get("Shared")) is not bool:
             raise SpaceError("Incomplete build-cache sharing/use metadata")
         parents = record.get("Parents", record.get(" Parents", [])) or []
+        if not isinstance(parents, list) or any(not isinstance(parent, str) or not parent for parent in parents):
+            raise SpaceError("Incomplete build-cache dependency metadata")
         if record.get("Parent"):
             parents = list(parents) + [record["Parent"]]
+        if any(not isinstance(parent, str) or not parent for parent in parents):
+            raise SpaceError("Incomplete build-cache dependency metadata")
+        parents = sorted(set(parents))
         item = dict(id=record["ID"], size_bytes=record["Size"], last_used=record.get("LastUsedAt"),
                     description=record.get("Description", ""), parents=parents, type=record.get("Type"), reasons=[])
         if record["InUse"]:
@@ -507,13 +512,9 @@ def load_policy(directory):
     return policy
 
 
-def default_policy():
-    """Retention is on unless a saved policy turns it off; the newest builds always stay."""
-    return dict(schema_version=SCHEMA, enabled=True, keep=DEFAULT_KEEP, repository="dclaude", binding={})
-
-
-def effective_policy(directory):
-    return load_policy(directory) or default_policy()
+def disabled_policy():
+    """Describe the unsaved state without granting automatic deletion authority."""
+    return dict(schema_version=SCHEMA, enabled=False, keep=DEFAULT_KEEP, repository="dclaude", binding={})
 
 
 def collect(docker, host, args, automatic=False):
@@ -719,10 +720,10 @@ def print_recovery(delta, receipt_path, wrapper, title="Verification", *, action
 
 def print_policy(policy, wrapper):
     saved = policy is not None
-    policy = policy or default_policy()
+    policy = policy or disabled_policy()
     print_result("Image retention enabled." if policy["enabled"] else "Image retention disabled.")
     print("\nPolicy")
-    row("Status", ("Enabled" if policy["enabled"] else "Disabled") + ("" if saved else " (default)"))
+    row("Status", ("Enabled" if policy["enabled"] else "Disabled") + ("" if saved else " (not configured)"))
     row("Keep newest", f"{policy['keep']} distinct builds")
     binding = policy.get("binding") or {}
     if binding.get("context"):
@@ -730,8 +731,8 @@ def print_policy(policy, wrapper):
     if binding.get("builder"):
         row("Builder", binding["builder"])
     if policy["enabled"]:
-        print("\nRuns after each launcher image build and at most once a day on launch.")
-        print("Retires labelled dclaude builds beyond the newest ones, then the build cache only they held.")
+        print("\nRuns after a launcher image build once warm-container bootstrap succeeds.")
+        print("Retires labelled dclaude builds beyond the newest ones.")
         print("Current images, container references and tags used elsewhere stay protected.")
     print_next(next_actions(wrapper, "retention"))
 
@@ -749,17 +750,34 @@ def confirm(action, count):
         raise SpaceError("Cancelled; nothing deleted.")
 
 
-def canonical(value):
-    """Inventory arrays describe sets of records/edges, not execution order."""
-    if isinstance(value, dict):
-        return {key: canonical(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return sorted((canonical(item) for item in value), key=lambda item: json.dumps(item, sort_keys=True))
-    return value
+def image_revalidation_key(candidate, completed=()):
+    """Only image identity, family edges, and remaining reviewed aliases authorize removal."""
+    completed = set(completed)
+    return dict(id=candidate["id"],
+                targets=sorted(target for target in candidate["targets"] if target not in completed),
+                members=sorted(candidate["members"]))
 
 
-def same_selection(left, right):
-    return json.dumps(canonical(left), sort_keys=True) == json.dumps(canonical(right), sort_keys=True)
+def cache_revalidation_key(candidate):
+    """Eligibility comes from the fresh plan; dependency identity must also stay stable."""
+    return dict(id=candidate["id"], parents=sorted(candidate["parents"]), type=candidate["type"])
+
+
+def revalidate_candidate(reviewed, plan, action, completed=()):
+    if plan["issues"]:
+        raise SpaceError("Docker eligibility is incomplete; stopped before mutation.")
+    eligible = next((candidate for candidate in plan["candidates"] if candidate["id"] == reviewed["id"]), None)
+    if eligible is None:
+        raise SpaceError(f"Target {reviewed['id']} changed or became protected; stopped without a broader fallback.")
+    if action == "images":
+        expected = image_revalidation_key(reviewed, completed)
+        observed = image_revalidation_key(eligible)
+    else:
+        expected = cache_revalidation_key(reviewed)
+        observed = cache_revalidation_key(eligible)
+    if expected != observed:
+        raise SpaceError(f"Target {reviewed['id']} metadata changed since confirmation; stopped.")
+    return eligible
 
 
 def validate_latest(directory):
@@ -774,20 +792,25 @@ def validate_latest(directory):
     return latest
 
 
-def inventory_signature(inventory):
-    return json.dumps(canonical({key: inventory[key] for key in ("images", "containers", "cache")}), sort_keys=True)
-
-
-def validate_automatic(args, directory):
-    """Automatic runs follow the effective policy. The pending-build marker only
-    records which launcher build is waiting; it is consumed after a success."""
-    policy = effective_policy(directory)
-    if not policy["enabled"]:
-        raise SpaceError("Retention is disabled; no cleanup performed.")
+def validate_automatic(docker, args, directory, binding):
+    """A saved policy and matching build marker are the only automatic authority."""
+    policy = load_policy(directory)
+    if not policy or not policy["enabled"]:
+        raise SpaceError("Retention has not been enabled; no cleanup performed.")
+    if policy["binding"] != binding:
+        raise SpaceError("The enabled retention policy belongs to a different Docker binding; run retention enable again.")
     if not RELEASE.fullmatch(args.current_image):
         raise SpaceError("Retention only manages default dclaude release images")
     pending = directory / "pending-build"
-    pending_id = pending.read_text().strip() if pending.exists() else None
+    pending_id = pending.read_text().strip() if pending.exists() else ""
+    if not IMAGE_ID.fullmatch(pending_id):
+        raise SpaceError("A verified completed-build marker is required for automatic retention.")
+    current = docker.api("GET", f"/images/{quote(args.current_image, safe='')}/json")
+    if current.get("Id") != pending_id:
+        raise SpaceError("The completed-build marker does not match the configured launcher image.")
+    labels = (current.get("Config") or {}).get("Labels") or {}
+    if labels.get(LABEL) != "true":
+        raise SpaceError("The completed launcher image is not positively labelled for retention.")
     args.keep = policy["keep"]
     args.disk_image = Path(policy["disk_image"]) if policy.get("disk_image") else None
     return pending_id
@@ -798,32 +821,16 @@ def consume_pending_build(directory, pending_id):
         (directory / "pending-build").unlink(missing_ok=True)
 
 
-def released_cache_ids(before_records, after_inventory):
-    """Cache that only the deleted images kept alive: shared with an image before
-    the deletions, private and unused afterwards. Records that were already
-    private may belong to other projects and stay outside automatic cleanup."""
-    shared_before = {record.get("ID") for record in before_records if record.get("Shared") is True}
-    try:
-        plan = cache_plan(after_inventory)
-    except SpaceError:
-        return []
-    if plan["issues"]:
-        return []
-    return [candidate["id"] for candidate in plan["candidates"] if candidate["id"] in shared_before]
-
-
-def apply_cleanup(docker, host, args, directory, automatic=False, restrict=None, provenance=None):
+def apply_cleanup(docker, host, args, directory, automatic=False):
     with operation_lock(directory):
-        docker.connect()
+        binding = docker.connect()
         # Unknown state cannot be overwritten into a valid-looking receipt.
         if automatic:
-            pending_id = validate_automatic(args, directory)
+            pending_id = validate_automatic(docker, args, directory, binding)
         else:
             load_policy(directory)
         validate_latest(directory)
         report = collect(docker, host, args, automatic)
-        if restrict is not None:
-            report["plan"]["candidates"] = [c for c in report["plan"]["candidates"] if c["id"] in restrict]
         if not automatic:
             if args.action == "images":
                 # Cache hints are presentation only; cache metadata cannot alter image eligibility.
@@ -846,7 +853,6 @@ def apply_cleanup(docker, host, args, directory, automatic=False, restrict=None,
                        binding=docker.binding, disk_image=report["host"]["disk_image"]["path"],
                        baseline=report["host"], steps=[], reviewed=candidates,
                        authority="enabled retention policy" if automatic else "interactive exact target confirmation")
-        receipt.update(provenance or {})
         receipt_path = directory / "receipts" / (dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + ".json")
 
         def save():
@@ -854,7 +860,6 @@ def apply_cleanup(docker, host, args, directory, automatic=False, restrict=None,
             write_json(directory / "latest.json", dict(schema_version=SCHEMA, receipt=str(receipt_path)))
 
         save()  # No mutation unless the durable receipt is writable.
-        expected_inventory = report["inventory"]
         try:
             for candidate in candidates:
                 targets = candidate.get("targets", [candidate["id"]])
@@ -862,88 +867,64 @@ def apply_cleanup(docker, host, args, directory, automatic=False, restrict=None,
                     binding = docker.connect()
                     if binding != receipt["binding"]:
                         raise SpaceError("Docker context/engine/builder/store changed; stopped before next mutation.")
-                    fresh = collect(docker, host, args, automatic)
-                    if inventory_signature(expected_inventory) != inventory_signature(fresh["inventory"]):
-                        raise SpaceError("Docker inventory changed since review or the previous step; stopped.")
-                    if fresh["plan"]["issues"] or not fresh["host"]["complete"]:
-                        raise SpaceError("Inventory or host measurement became incomplete; stopped.")
-                    delta = host_delta(report["host"], fresh["host"])
-                    if not delta["measured"]:
-                        raise SpaceError(delta["reason"])
-                    eligible = next((c for c in fresh["plan"]["candidates"] if c["id"] == candidate["id"]), None)
-                    if not eligible or (args.action == "images" and target not in eligible["targets"]):
+                    fresh_inventory = docker.inventory()
+                    fresh_plan = (image_plan(fresh_inventory, args.current_image, args.keep, automatic)
+                                  if args.action == "images" else cache_plan(fresh_inventory))
+                    completed = {step["target"] for step in receipt["steps"]
+                                 if step.get("candidate_id") == candidate["id"] and step.get("status") == "completed"}
+                    eligible = revalidate_candidate(candidate, fresh_plan, args.action, completed)
+                    if args.action == "images" and target not in eligible["targets"]:
                         raise SpaceError(f"Target {target} changed or became protected; stopped without a broader fallback.")
-                    # Remaining aliases must be exactly the reviewed ones, minus
-                    # aliases already successfully untagged by this receipt.
-                    done = {s["target"] for s in receipt["steps"] if s.get("status") == "completed"}
-                    expected = dict(candidate)
-                    if args.action == "images":
-                        expected["targets"] = [t for t in candidate["targets"] if t not in done]
-                    comparable = dict(eligible)
-                    if args.action == "cache":
-                        # Releasing a reviewed child can update its parent's
-                        # last-use timestamp. Full inventory drift is checked
-                        # against our own preceding post-mutation observation.
-                        expected.pop("last_used", None)
-                        comparable.pop("last_used", None)
-                    if not same_selection(expected, comparable):
-                        raise SpaceError(f"Target {target} metadata changed since confirmation; stopped.")
-                    step = dict(target=target, before=fresh["host"], status="started", started_at=now())
+                    step = dict(candidate_id=candidate["id"], target=target,
+                                status="started", started_at=now())
                     receipt["steps"].append(step)
                     save()
                     try:
                         response = docker.delete_image(target) if args.action == "images" else docker.delete_cache(target)
                         step["response"] = response
-                    except Exception:
-                        # An API error may follow a partial mutation. Preserve a
-                        # fresh observation without retrying or widening scope.
-                        with contextlib.suppress(Exception):
-                            step["after_inventory"] = docker.inventory()
-                            step["after"] = host.snapshot(args.disk_image)
+                        # Docker may release coupled cache twins; record actual
+                        # fresh inventory and stop if public records outside
+                        # consent vanish.
+                        if args.action == "cache":
+                            after_inventory = docker.inventory()
+                            old_ids = {r["ID"] for r in fresh_inventory["cache"]}
+                            new_ids = {r["ID"] for r in after_inventory["cache"]}
+                            step["cache_records_disappeared"] = sorted(old_ids - new_ids)
+                            if (old_ids - new_ids) - {candidate["id"]}:
+                                raise SpaceError("Cache records outside this exact target changed; stopped. See receipt.")
+                    except BaseException as exc:
+                        # An error may follow a partial mutation. Persist it
+                        # before any optional observation, without retrying or
+                        # widening scope.
+                        step["status"] = "error"
+                        step["error"] = str(exc) or type(exc).__name__
+                        step["finished_at"] = now()
+                        save()
+                        if "response" not in step:
+                            with contextlib.suppress(Exception):
+                                step["after_inventory"] = docker.inventory()
+                                save()
                         raise
-                    # Docker may release coupled cache twins; record actual fresh
-                    # inventory and stop if public records outside consent vanish.
-                    after_inventory = docker.inventory()
-                    if args.action == "cache":
-                        old_ids = {r["ID"] for r in fresh["inventory"]["cache"]}
-                        new_ids = {r["ID"] for r in after_inventory["cache"]}
-                        step["cache_records_disappeared"] = sorted(old_ids - new_ids)
-                        if (old_ids - new_ids) - {candidate["id"]}:
-                            step["status"] = "unexpected_dependency_change"
-                            save()
-                            raise SpaceError("Cache records outside this exact target changed; stopped. See receipt.")
-                    expected_inventory = after_inventory
-                    step["after"] = host.snapshot(args.disk_image)
-                    step["delta"] = host_delta(step["before"], step["after"])
                     step["status"] = "completed"
                     if args.action == "cache" and target not in step["cache_records_disappeared"]:
                         step["status"] = "skipped"
                         step["note"] = "Engine retained this record (for example, a dependent still references it); no wider prune attempted."
+                    step["finished_at"] = now()
                     save()
-            # Recheck cache after image deletion: shared/private status changes.
-            receipt["after_inventory"] = docker.inventory()
-            if automatic and args.action == "images":
-                receipt["released_cache"] = released_cache_ids(report["inventory"]["cache"], receipt["after_inventory"])
-            # A launch is waiting behind automatic runs; Docker documents
-            # reclamation within seconds, and verify can remeasure later.
-            deadline = time.monotonic() + (10 if automatic else 60)
-            while True:
-                receipt["after"] = host.snapshot(args.disk_image)
-                receipt["delta"] = host_delta(receipt["baseline"], receipt["after"])
-                save()
-                if receipt["delta"].get("recovery_observed") or time.monotonic() >= deadline:
-                    break
-                time.sleep(min(2, max(0, deadline - time.monotonic())))
             receipt["status"] = "completed"
         except BaseException as exc:
             receipt["status"] = "partial"
             receipt["error"] = str(exc) or type(exc).__name__
             receipt["finished_at"] = now()
+            save()
             with contextlib.suppress(Exception):
+                receipt["after"] = host.snapshot(args.disk_image)
+                receipt["delta"] = host_delta(receipt["baseline"], receipt["after"])
                 save()
             raise
-        finally:
-            receipt["finished_at"] = now()
+        receipt["finished_at"] = now()
+        receipt["after"] = host.snapshot(args.disk_image)
+        receipt["delta"] = host_delta(receipt["baseline"], receipt["after"])
         save()
         if not automatic:
             skipped = sum(step["status"] == "skipped" for step in receipt["steps"])
@@ -955,35 +936,26 @@ def apply_cleanup(docker, host, args, directory, automatic=False, restrict=None,
 
 
 def automatic_retention(docker, host, args, directory):
-    """Launcher-triggered cleanup: old labelled builds first, then only the cache they held."""
-    if not effective_policy(directory)["enabled"]:
+    """After an enabled launcher build, retire only old labelled image history."""
+    policy = load_policy(directory)
+    if not policy or not policy["enabled"]:
+        return 0
+    pending = directory / "pending-build"
+    if not pending.exists():
         return 0
     if platform.system() != "Darwin":
         # Automatic cleanup supports local macOS Docker Desktop; elsewhere the launcher just runs.
-        (directory / "pending-build").unlink(missing_ok=True)
+        pending.unlink(missing_ok=True)
         return 0
     args.action = "images"
     images = apply_cleanup(docker, host, args, directory, automatic=True)
     if images is None:
         return 0
-    images_path = read_json(directory / "latest.json")["receipt"]
     removed = [step["target"] for step in images["steps"] if step.get("status") == "completed"]
     reported = sum(candidate["size_bytes"] for candidate in images["reviewed"])
     print(f"Retention removed {len(removed)} old dclaude build{'' if len(removed) == 1 else 's'}: "
           f"{', '.join(removed)} ({human_bytes(reported)} reported)", file=sys.stderr)
-    cache = None
-    released = images.get("released_cache") or []
-    if released:
-        args.action = "cache"
-        cache = apply_cleanup(docker, host, args, directory, automatic=True, restrict=set(released),
-                              provenance=dict(authority="build cache released by automatic image retention",
-                                              released_by_receipt=images_path))
-    if cache:
-        cleared = [step for step in cache["steps"] if step.get("status") == "completed"]
-        reported = sum(candidate["size_bytes"] for candidate in cache["reviewed"])
-        print(f"Retention cleared {len(cleared)} build-cache record{'' if len(cleared) == 1 else 's'} "
-              f"those builds held ({human_bytes(reported)} reported)", file=sys.stderr)
-    delta = (cache or images).get("delta") or {}
+    delta = images.get("delta") or {}
     startup = next((c for c in delta.get("apfs", []) if "startup" in c["roles"]), None) if delta.get("measured") else None
     receipt_path = read_json(directory / "latest.json")["receipt"]
     if startup:
@@ -1002,19 +974,20 @@ def parser():
   cache                  Preview private unused default-builder cache records.
   cache --apply          Confirm separate builder-wide cache deletion.
   verify                 Remeasure the latest receipt; never delete anything.
-  retention status       Show the image policy; retention is on by default.
-  retention enable       Save a keep count or disk-image path for automatic retention.
-  retention disable      Stop automatic image and cache cleanup; retain all history.
+  retention status       Show whether automatic image retention is configured.
+  retention enable       Save a keep count, Docker binding, and disk-image path.
+  retention disable      Stop automatic image cleanup; retain all history.
 
-Retention keeps the newest 2 launcher builds and runs after each image build
-and at most once a day on launch. It retires older labelled dclaude images and
-only the build cache those images held. Images built by older launchers carry no
-label; retire them once with images --apply.
+Retention is opt-in. Once enabled, it keeps the newest 2 launcher builds and runs
+after a successful image build and warm-container bootstrap. It retires only older
+labelled dclaude images. Images built by older launchers carry no label; retire
+them once with images --apply. Cache cleanup always remains a separate choice.
 Requires host Python 3 and local macOS Docker Desktop with Engine API 1.48+
 for storage operations.
 Runs before repository lookup, builds, updates, or agent startup. Launches
-without host Python 3 skip automatic retention with a warning. --apply requires
-a terminal; --yes only authorizes launcher updates. Other Docker clients must be idle.
+without host Python 3 skip enabled build-triggered retention with a warning.
+--apply requires a terminal; --yes only authorizes launcher updates. Other Docker
+clients must be idle.
 For moved Docker.raw files use --disk-image PATH from Desktop Settings.
 Default output uses Result, measurements, Issues (when needed), and Next commands.
 --json includes full IDs, references, and bytes.
@@ -1026,7 +999,6 @@ See docs/SPACE.md for examples, protections, receipts, and native cache GC setup
     result.add_argument("--apply", action="store_true", help="print exact targets and ask for interactive deletion consent")
     result.add_argument("--json", action="store_true", help="read-only structured inventory with byte counts and protection reasons")
     result.add_argument("--disk-image", type=Path, help="Docker.raw path from Docker Desktop Settings when moved")
-    result.add_argument("--tool-home", default=str(Path(__file__).resolve().parents[1]), help=argparse.SUPPRESS)
     result.add_argument("--current-image", default="dclaude:unknown", help=argparse.SUPPRESS)
     result.add_argument("--wrapper", default="dclaude", help=argparse.SUPPRESS)
     result.add_argument("--auto-retain", action="store_true", help=argparse.SUPPRESS)
@@ -1058,14 +1030,14 @@ def main(argv=None):
             saved = load_policy(directory)
             if args.retention_action == "disable":
                 with operation_lock(directory):
-                    policy = load_policy(directory) or default_policy()
+                    policy = load_policy(directory) or disabled_policy()
                     policy["enabled"] = False
                     policy["updated_at"] = now()
                     write_json(directory / "policy.json", policy)
                 print_result("Image retention disabled. Nothing deleted.")
                 print_next(next_actions(args.wrapper, "retention"))
             elif args.json:
-                print(json.dumps(dict(saved or default_policy(), saved=saved is not None), indent=2))
+                print(json.dumps(dict(saved or disabled_policy(), saved=saved is not None), indent=2))
             else:
                 print_policy(saved, args.wrapper)
             return 0

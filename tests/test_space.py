@@ -40,7 +40,7 @@ def cache(record, **extra):
 
 def inventory(images=None, containers=None, records=None):
     return dict(images=images if images is not None else [image("a", "0.0.1"), image("f", "0.0.9", created=9)],
-                containers=containers or [], cache=records or [], layers_size=2000)
+                containers=containers or [], cache=records or [])
 
 
 def measurement(free=100, allocated=1000, **extra):
@@ -294,38 +294,6 @@ class CachePlanningTests(unittest.TestCase):
         with patch.object(docker, "api") as api:
             docker.delete_image("dclaude:0.0.1")
         self.assertEqual(api.call_args.args, ("DELETE", "/images/dclaude%3A0.0.1", dict(force="false", noprune="true")))
-
-
-class InventoryComparisonTests(unittest.TestCase):
-    def setUp(self):
-        manifests = [dict(ID=ident("b"), Available=True, Kind="image"),
-                     dict(ID=ident("c"), Available=True, Kind="attestation", AttestationData=dict(For=ident("b")))]
-        old = image("a", "0.0.1", Manifests=manifests)
-        old["RepoTags"].append("dclaude:0.0.2")
-        old["RepoDigests"] = ["dclaude@" + ident("b"), "dclaude@" + ident("c")]
-        mounts = [dict(Type="bind", Source="/repo"), dict(Type="image", Source="dclaude@" + ident("f"))]
-        containers = [dict(Id="one", Image=ident("f"), HostConfig=dict(Mounts=mounts), Mounts=copy.deepcopy(mounts)),
-                      dict(Id="two", Image=ident("f"))]
-        self.contents = inventory([old, image("f", "0.0.9", created=9)], containers,
-                                  [cache("child", Parents=["parent1", "parent2"]), cache("parent1"), cache("parent2")])
-
-    def test_docker_enumeration_order_does_not_change_inventory_identity(self):
-        reordered = reverse_inventory_lists(self.contents)
-        self.assertEqual(space.inventory_signature(self.contents), space.inventory_signature(reordered))
-
-    def test_real_reference_or_eligibility_mutations_still_change_identity(self):
-        mutations = (
-            lambda value: value["containers"][0].update(Image=ident("a")),
-            lambda value: value["containers"][0]["HostConfig"]["Mounts"][1].update(Source="dclaude@" + ident("a")),
-            lambda value: value["images"][0]["RepoTags"].append("other:project"),
-            lambda value: value["images"][0]["Manifests"][0].update(ID=ident("d")),
-            lambda value: value["cache"][0]["Parents"].append("parent3"),
-            lambda value: value["cache"][0].update(Shared=True),
-        )
-        for mutate in mutations:
-            changed = reverse_inventory_lists(reverse_inventory_lists(self.contents))
-            mutate(changed)
-            self.assertNotEqual(space.inventory_signature(self.contents), space.inventory_signature(changed))
 
 
 class MeasurementTests(unittest.TestCase):
@@ -621,7 +589,7 @@ class DockerBoundaryTests(unittest.TestCase):
         self.assertEqual(result["images"][0]["Manifests"][0]["ID"], ident("b"))
         self.assertEqual(result["containers"][0]["Image"], ident("b"))
         self.assertEqual(result["cache"][0]["ID"], "private")
-        self.assertIsNone(result["layers_size"])
+        self.assertEqual(set(result), {"images", "containers", "cache", "measured_at"})
 
 
 class DockerDeadlineTests(unittest.TestCase):
@@ -772,15 +740,16 @@ class StateAndApplyTests(SpaceFixture):
             self.apply()
         self.assertEqual(self.docker.deleted, [])
 
-    def test_disk_replacement_between_preview_and_apply_stops_mutation(self):
+    def test_changed_followup_disk_identity_reports_unmeasured_recovery(self):
         def replace(count, result):
             if count > 1:
                 result["disk_image"]["inode"] = 99
             return result
         self.host.hook = replace
-        with self.assertRaises(space.SpaceError):
-            self.apply()
-        self.assertEqual(self.docker.deleted, [])
+        result = self.apply()
+        self.assertEqual(self.docker.deleted, ["dclaude:0.0.1"])
+        self.assertFalse(result["delta"]["measured"])
+        self.assertIn("identity changed", result["delta"]["reason"])
 
     def test_error_stops_without_global_fallback_and_saves_partial_receipt(self):
         self.docker.contents["images"].insert(1, image("b", "0.0.2", created=2))
@@ -818,6 +787,18 @@ class StateAndApplyTests(SpaceFixture):
         self.assertEqual(saved["status"], "partial")
         self.assertEqual(self.docker.deleted, ["dclaude:0.0.1"])
 
+    def test_target_error_is_durable_when_followup_probes_also_fail(self):
+        self.docker.delete_hook = lambda *_: (_ for _ in ()).throw(space.SpaceError("delete failed"))
+        self.docker.inventory_hooks[3] = lambda *_: (_ for _ in ()).throw(space.SpaceError("inventory failed"))
+        self.host.hook = lambda count, result: (result if count == 1 else
+                                                 (_ for _ in ()).throw(RuntimeError("host failed")))
+        with self.assertRaises(space.SpaceError):
+            self.apply()
+        saved = self.receipt()
+        self.assertEqual(saved["status"], "partial")
+        self.assertEqual(saved["steps"][0]["status"], "error")
+        self.assertIn("delete failed", saved["steps"][0]["error"])
+
     def test_cache_refusal_is_recorded_as_skipped_without_wider_prune(self):
         self.args.action = "cache"
         self.docker.contents["cache"] = [cache("a")]
@@ -826,11 +807,33 @@ class StateAndApplyTests(SpaceFixture):
         delete.assert_called_once_with("a")
         self.assertEqual(self.receipt()["steps"][0]["status"], "skipped")
 
-    def test_unrelated_inventory_change_aborts_before_first_delete(self):
+    def test_unrelated_image_addition_does_not_block_reviewed_image(self):
         self.docker.inventory_hooks[2] = lambda d: d.contents["images"].append(image("b", RepoTags=["other:project"]))
-        with self.assertRaises(space.SpaceError):
-            self.apply()
-        self.assertEqual(self.docker.deleted, [])
+        result = self.apply()
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(self.docker.deleted, ["dclaude:0.0.1"])
+
+    def test_unrelated_cache_addition_does_not_block_reviewed_image(self):
+        self.docker.inventory_hooks[2] = lambda d: d.contents["cache"].append(cache("other-project"))
+        result = self.apply()
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(self.docker.deleted, ["dclaude:0.0.1"])
+
+    def test_unrelated_image_addition_does_not_block_reviewed_cache(self):
+        self.args.action = "cache"
+        self.docker.contents["cache"] = [cache("approved")]
+        self.docker.inventory_hooks[2] = lambda d: d.contents["images"].append(image("b", RepoTags=["other:project"]))
+        result = self.apply()
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(self.docker.deleted, ["approved"])
+
+    def test_unrelated_cache_addition_does_not_block_reviewed_cache(self):
+        self.args.action = "cache"
+        self.docker.contents["cache"] = [cache("approved")]
+        self.docker.inventory_hooks[2] = lambda d: d.contents["cache"].append(cache("other-project"))
+        result = self.apply()
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(self.docker.deleted, ["approved"])
 
     def test_reordered_images_tags_manifests_and_container_mounts_allow_reviewed_cleanup(self):
         self.docker.contents["images"][0]["RepoTags"].append("dclaude:0.0.2")
@@ -870,10 +873,36 @@ class StateAndApplyTests(SpaceFixture):
             self.apply()
         self.assertEqual(self.docker.deleted, [])
 
+    def test_changed_image_family_members_stop_before_delete(self):
+        self.docker.contents["images"][0]["Manifests"] = [
+            dict(ID=ident("b"), Available=True, Kind="image")]
+        self.docker.inventory_hooks[2] = lambda d: d.contents["images"][0]["Manifests"].append(
+            dict(ID=ident("c"), Available=True, Kind="attestation", AttestationData=dict(For=ident("b"))))
+        with self.assertRaises(space.SpaceError):
+            self.apply()
+        self.assertEqual(self.docker.deleted, [])
+
+    def test_cache_presentation_changes_do_not_block_eligible_target(self):
+        self.args.action = "cache"
+        self.docker.contents["cache"] = [cache("a")]
+        self.docker.inventory_hooks[2] = lambda d: d.contents["cache"][0].update(
+            Size=200, Description="updated display text", LastUsedAt="2026-02-02T00:00:00Z")
+        result = self.apply()
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(self.docker.deleted, ["a"])
+
     def test_cache_shared_after_confirmation_is_never_deleted(self):
         self.args.action = "cache"
         self.docker.contents["cache"] = [cache("a")]
         self.docker.inventory_hooks[2] = lambda d: d.contents["cache"][0].update(Shared=True)
+        with self.assertRaises(space.SpaceError):
+            self.apply()
+        self.assertEqual(self.docker.deleted, [])
+
+    def test_cache_in_use_after_confirmation_is_never_deleted(self):
+        self.args.action = "cache"
+        self.docker.contents["cache"] = [cache("a")]
+        self.docker.inventory_hooks[2] = lambda d: d.contents["cache"][0].update(InUse=True)
         with self.assertRaises(space.SpaceError):
             self.apply()
         self.assertEqual(self.docker.deleted, [])
@@ -887,7 +916,14 @@ class StateAndApplyTests(SpaceFixture):
         with self.assertRaises(space.SpaceError):
             self.apply()
         self.assertEqual(self.docker.deleted, ["a"])
-        self.assertEqual(self.receipt()["steps"][0]["status"], "unexpected_dependency_change")
+        self.assertEqual(self.receipt()["steps"][0]["status"], "error")
+
+    def test_host_measurement_count_is_constant_across_many_targets(self):
+        self.docker.contents["images"].insert(1, image("b", "0.0.2", created=2))
+        result = self.apply()
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(self.docker.deleted, ["dclaude:0.0.1", "dclaude:0.0.2"])
+        self.assertEqual(self.host.count, 2)
 
     def test_lock_never_steals_a_stale_owner(self):
         self.directory.mkdir()
@@ -993,7 +1029,7 @@ class CommandTests(SpaceFixture):
         self.assertFalse(self.directory.exists())
 
     def test_abbreviated_hidden_flags_cannot_bypass_wrapper_rejection(self):
-        for args in (("--current-im", "other:tag"), ("--tool-h", "/tmp"), ("--wrapp", "other"), ("--auto-ret",)):
+        for args in (("--current-im", "other:tag"), ("--wrapp", "other"), ("--auto-ret",)):
             with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit) as caught:
                     space.parser().parse_args(list(args))
@@ -1046,14 +1082,14 @@ class CommandTests(SpaceFixture):
         self.assertEqual(self.run_main("verify"), 2)
         self.assertIn("Invalid receipt location", self.output.getvalue())
 
-    def test_retention_is_enabled_by_default_and_keeps_two_builds(self):
+    def test_retention_is_disabled_until_a_policy_is_saved(self):
         self.assertEqual(self.run_main("retention", "status", "--json"), 0)
         status = json.loads(self.output.getvalue())
-        self.assertEqual((status["enabled"], status["keep"], status["saved"]), (True, 2, False))
+        self.assertEqual((status["enabled"], status["keep"], status["saved"]), (False, 2, False))
         self.assertFalse((self.directory / "policy.json").exists())
         self.output = io.StringIO()
         self.assertEqual(self.run_main("retention", "status"), 0)
-        self.assertIn("Enabled (default)", self.output.getvalue())
+        self.assertIn("Disabled (not configured)", self.output.getvalue())
         self.assertEqual(self.docker.connect_count, 0)
 
     def test_retention_disable_without_a_saved_policy_persists_and_stops_automatic_runs(self):
@@ -1069,43 +1105,69 @@ class CommandTests(SpaceFixture):
         self.assertEqual(self.run_main("retention", "enable"), 0)
         self.assertTrue(space.load_policy(self.directory)["enabled"])
 
-    def test_auto_retention_runs_by_default_after_a_build_and_reports_what_it_removed(self):
+    def test_missing_policy_never_connects_or_deletes_automatically(self):
         self.docker.contents = inventory([image("a", "0.0.1"), image("b", "0.0.2", created=2), image("f", "0.0.9", created=9)])
         self.directory.mkdir()
+        (self.directory / "pending-build").write_text(ident("f") + "\n")
+        self.assertEqual(self.run_main("--auto-retain"), 0)
+        self.assertEqual(self.docker.connect_count, 0)
+        self.assertEqual(self.docker.deleted, [])
+        self.assertTrue((self.directory / "pending-build").exists())
+        self.assertFalse((self.directory / "policy.json").exists())
+
+    def test_enabled_auto_retention_reports_removed_images(self):
+        self.docker.contents = inventory([image("a", "0.0.1"), image("b", "0.0.2", created=2), image("f", "0.0.9", created=9)])
+        self.policy(keep=2)
         (self.directory / "pending-build").write_text(ident("f") + "\n")
         self.assertEqual(self.run_main("--auto-retain"), 0)
         self.assertEqual(self.docker.deleted, ["dclaude:0.0.1"])
         self.confirm_mock.assert_not_called()
         self.assertFalse((self.directory / "pending-build").exists())
-        self.assertFalse((self.directory / "policy.json").exists())
         output = self.output.getvalue()
         self.assertIn("Retention removed 1 old dclaude build: dclaude:0.0.1", output)
         self.assertIn("receipt", output)
         self.assertEqual(self.receipt()["authority"], "enabled retention policy")
 
-    def test_auto_retention_sweeps_without_a_pending_build_and_survives_binding_changes(self):
+    def test_automatic_retention_rejects_a_different_saved_binding(self):
         self.policy(binding=dict(self.docker.binding, daemon_id="reinstalled-desktop"))
-        self.assertEqual(self.run_main("--auto-retain"), 0)
-        self.assertEqual(self.docker.deleted, ["dclaude:0.0.1"])
-        self.assertFalse((self.directory / "pending-build").exists())
+        (self.directory / "pending-build").write_text(ident("f") + "\n")
+        self.assertEqual(self.run_main("--auto-retain"), 2)
+        self.assertEqual(self.docker.deleted, [])
+        self.assertTrue((self.directory / "pending-build").exists())
+        self.assertIn("different Docker binding", self.output.getvalue())
 
-    def test_auto_retention_consumes_a_stale_pending_marker_after_success(self):
+    def test_automatic_retention_requires_the_pending_build_to_match_current_image(self):
         self.policy()
         (self.directory / "pending-build").write_text(ident("b") + "\n")
+        self.assertEqual(self.run_main("--auto-retain"), 2)
+        self.assertEqual(self.docker.deleted, [])
+        self.assertTrue((self.directory / "pending-build").exists())
+        self.assertIn("does not match", self.output.getvalue())
+
+    def test_unknown_policy_schema_fails_closed_before_connecting(self):
+        self.directory.mkdir()
+        (self.directory / "policy.json").write_text('{"schema_version": 2, "enabled": true}\n')
+        (self.directory / "pending-build").write_text(ident("f") + "\n")
+        self.assertEqual(self.run_main("--auto-retain"), 2)
+        self.assertEqual(self.docker.connect_count, 0)
+        self.assertEqual(self.docker.deleted, [])
+
+    def test_enabled_policy_without_pending_build_never_connects(self):
+        self.policy()
         self.assertEqual(self.run_main("--auto-retain"), 0)
-        self.assertEqual(self.docker.deleted, ["dclaude:0.0.1"])
-        self.assertFalse((self.directory / "pending-build").exists())
+        self.assertEqual(self.docker.connect_count, 0)
+        self.assertEqual(self.docker.deleted, [])
 
     def test_auto_retention_is_a_silent_noop_off_macos(self):
         self.platform = "Linux"
-        self.directory.mkdir()
+        self.policy()
         (self.directory / "pending-build").write_text(ident("f") + "\n")
         self.assertEqual(self.run_main("--auto-retain"), 0)
         self.assertEqual(self.output.getvalue(), "")
         self.assertEqual(self.docker.connect_count, 0)
         self.assertFalse((self.directory / "pending-build").exists())
 
-    def test_auto_retention_prunes_only_the_cache_its_own_image_deletions_released(self):
+    def test_auto_retention_leaves_all_build_cache_untouched(self):
         records = [cache("child-a", Shared=True, Parents=["held-a"]), cache("held-a", Shared=True),
                    cache("held-f", Shared=True), cache("private-x"), cache("busy-a", Shared=True, InUse=True)]
         self.docker.contents = inventory(records=records)
@@ -1113,34 +1175,16 @@ class CommandTests(SpaceFixture):
         self.policy()
         (self.directory / "pending-build").write_text(ident("f") + "\n")
         self.assertEqual(self.run_main("--auto-retain"), 0)
-        self.assertEqual(self.docker.deleted, ["dclaude:0.0.1", "child-a", "held-a"])
-        self.assertEqual({record["ID"] for record in self.docker.contents["cache"]}, {"held-f", "private-x", "busy-a"})
-        cache_receipt = self.receipt()
-        self.assertEqual(cache_receipt["action"], "cache")
-        self.assertEqual(cache_receipt["authority"], "build cache released by automatic image retention")
-        images_receipt = json.loads(Path(cache_receipt["released_by_receipt"]).read_text())
-        self.assertEqual((images_receipt["action"], images_receipt["status"]), ("images", "completed"))
-        self.assertEqual(images_receipt["released_cache"], ["child-a", "held-a"])
+        self.assertEqual(self.docker.deleted, ["dclaude:0.0.1"])
+        self.assertEqual({record["ID"] for record in self.docker.contents["cache"]},
+                         {"child-a", "held-a", "held-f", "private-x", "busy-a"})
+        receipt = self.receipt()
+        self.assertEqual(receipt["action"], "images")
+        self.assertEqual(len(list((self.directory / "receipts").glob("*.json"))), 1)
         self.assertFalse((self.directory / "pending-build").exists())
         output = self.output.getvalue()
         self.assertIn("Retention removed 1 old dclaude build: dclaude:0.0.1", output)
-        self.assertIn("Retention cleared 2 build-cache records those builds held", output)
-
-    def test_auto_retention_cache_failure_keeps_image_results_and_reports(self):
-        self.docker.contents = inventory(records=[cache("held-a", Shared=True)])
-        self.docker.held = {ident("a"): ["held-a"]}
-        self.policy()
-        (self.directory / "pending-build").write_text(ident("f") + "\n")
-
-        def fail_cache(docker, target):
-            if target == "held-a":
-                raise space.SpaceError("busy record")
-        self.docker.delete_hook = fail_cache
-        self.assertEqual(self.run_main("--auto-retain"), 2)
-        self.assertEqual(self.docker.deleted, ["dclaude:0.0.1", "held-a"])
-        self.assertFalse((self.directory / "pending-build").exists())
-        self.assertEqual(self.receipt()["status"], "partial")
-        self.assertIn("Automatic retention stopped: busy record", self.output.getvalue())
+        self.assertNotIn("Retention cleared", output)
 
     def test_auto_retention_consumes_pending_only_after_success(self):
         self.policy()

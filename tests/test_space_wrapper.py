@@ -5,7 +5,6 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
-import time
 import unittest
 
 
@@ -40,7 +39,6 @@ class SpaceWrapperTests(unittest.TestCase):
             PATH=f"{self.bin}:{os.environ['PATH']}",
             TEST_LOG=str(self.log),
             TEST_IMAGE_ID=IMAGE_ID,
-            DCLAUDE_RETENTION_INTERVAL_SECONDS="0",  # sweeps are exercised explicitly
         )
         self.executable("python3", """#!/bin/bash
 printf 'python' >> "$TEST_LOG"
@@ -107,66 +105,44 @@ emit_startup_banner() { :; }
 launch_agent claude "$@"
 """, *args)
 
-    def enable_retention(self, enabled=True, image_id=IMAGE_ID):
+    def enable_retention(self, enabled=True, image_id=IMAGE_ID, *, pending=True):
         self.state.mkdir(parents=True, exist_ok=True)
         self.state.joinpath("policy.json").write_text(
             '{"schema_version": 1, "enabled": ' + str(enabled).lower() + ', "keep": 2}\n'
         )
-        self.state.joinpath("pending-build").write_text(image_id + "\n")
+        if pending:
+            self.state.joinpath("pending-build").write_text(image_id + "\n")
+        else:
+            self.state.joinpath("pending-build").unlink(missing_ok=True)
 
-    def stamp_sweep(self, age_seconds):
-        self.state.mkdir(parents=True, exist_ok=True)
-        self.state.joinpath("retention-check").write_text(f"{int(time.time()) - age_seconds}\n")
-
-    def test_default_policy_retains_after_a_build_without_any_saved_state(self):
+    def test_build_without_saved_policy_does_not_invoke_retention(self):
         result = self.run_launch("--rebuild")
         self.assertEqual(result.returncode, 0, result.stderr)
-        calls = self.calls()
-        self.assertLess(calls.index("bootstrap"), calls.index("<--auto-retain>"))
+        self.assertNotIn("python", self.calls())
         self.assertFalse((self.state / "policy.json").exists())
-        self.assertTrue((self.state / "retention-check").exists())
+        self.assertTrue((self.state / "pending-build").exists())
+        self.assertEqual({path.name for path in self.state.iterdir()}, {"pending-build"})
 
-    def test_sweep_runs_at_most_once_per_interval_without_a_pending_build(self):
-        self.env["DCLAUDE_RETENTION_INTERVAL_SECONDS"] = "3600"
-        result = self.run_launch()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.calls().count("<--auto-retain>"), 1)
-        stamp = int((self.state / "retention-check").read_text().strip())
-        self.assertLessEqual(abs(stamp - int(time.time())), 5)
-        result = self.run_launch()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.calls().count("<--auto-retain>"), 1)
-        self.stamp_sweep(7200)
-        result = self.run_launch()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.calls().count("<--auto-retain>"), 2)
-
-    def test_stale_pending_marker_does_not_block_a_due_sweep(self):
-        self.env["DCLAUDE_RETENTION_INTERVAL_SECONDS"] = "3600"
-        self.enable_retention(image_id="sha256:" + "b" * 64)
-        result = self.run_launch()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("<--auto-retain>", self.calls())
-
-    def test_disabled_policy_skips_sweeps_and_builds_without_python(self):
-        self.env["DCLAUDE_RETENTION_INTERVAL_SECONDS"] = "1"
+    def test_disabled_policy_skips_build_retention_without_python(self):
         self.env["PYTHON_EXIT"] = "98"
-        self.enable_retention(enabled=False)
-        for args in ((), ("--rebuild",)):
+        self.enable_retention(enabled=False, pending=False)
+        for args, expected_state in (((), {"policy.json"}),
+                                     (("--rebuild",), {"policy.json", "pending-build"})):
             with self.subTest(args=args):
                 result = self.run_launch(*args)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertNotIn("python", self.calls())
-                self.assertFalse((self.state / "retention-check").exists())
+                self.assertEqual({path.name for path in self.state.iterdir()}, expected_state)
 
-    def test_sweep_failure_names_its_trigger_and_keeps_the_launch(self):
-        self.env["DCLAUDE_RETENTION_INTERVAL_SECONDS"] = "3600"
+    def test_enabled_retention_failure_keeps_the_launch(self):
+        self.enable_retention()
         self.env["PYTHON_EXIT"] = "2"
         result = self.run_launch()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("automatic image retention (sweep) did not complete", result.stderr)
+        self.assertIn("automatic image retention did not complete", result.stderr)
         self.assertIn("dclaude --space retention status", result.stderr)
         self.assertIn("<agent>", self.calls())
+        self.assertTrue((self.state / "pending-build").exists())
 
     def test_both_wrappers_dispatch_space_before_repo_or_docker(self):
         for wrapper in ("dclaude", "dcodex"):
@@ -215,7 +191,7 @@ launch_agent claude "$@"
         self.assertFalse((self.state / "operation.lock").exists())
 
     def test_public_space_cannot_override_internal_context_or_skip_confirmation(self):
-        for option in ("--tool-home", "--current-image", "--wrapper", "--auto-retain"):
+        for option in ("--current-image", "--wrapper", "--auto-retain"):
             for form in (option, option + "=override"):
                 with self.subTest(option=form):
                     result = self.run_wrapper("--space", form)
@@ -224,7 +200,7 @@ launch_agent claude "$@"
                     self.assertEqual(self.calls(), "")
 
     def test_default_build_is_labelled_and_locked_through_bootstrap(self):
-        self.enable_retention()
+        self.enable_retention(pending=False)
         result = self.run_launch("--rebuild")
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.calls()
@@ -241,7 +217,7 @@ launch_agent claude "$@"
             with self.subTest(key=key, value=value):
                 self.log.unlink(missing_ok=True)
                 self.env[key] = value
-                self.enable_retention()
+                self.enable_retention(pending=False)
                 result = self.run_launch("--rebuild")
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertNotIn("<--label>", self.calls())
@@ -253,10 +229,17 @@ launch_agent claude "$@"
         result = self.run_launch("hello")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("python", self.calls())
-        self.enable_retention(enabled=False)
+        self.enable_retention(enabled=False, pending=False)
         result = self.run_launch("--rebuild")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("python", self.calls())
+
+    def test_enabled_policy_without_pending_build_does_not_use_python(self):
+        self.enable_retention(pending=False)
+        result = self.run_launch("hello")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("python", self.calls())
+        self.assertEqual({path.name for path in self.state.iterdir()}, {"policy.json"})
 
     def test_failure_to_retain_does_not_block_agent(self):
         self.enable_retention()
@@ -265,6 +248,7 @@ launch_agent claude "$@"
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("continuing agent launch", result.stderr)
         self.assertIn("<agent>", self.calls())
+        self.assertTrue((self.state / "pending-build").exists())
 
     def test_missing_python_only_blocks_explicit_space_commands(self):
         (self.bin / "python3").unlink()
@@ -301,13 +285,14 @@ launch_agent claude "$@"
         for failure in ("BUILD_EXIT", "BOOTSTRAP_EXIT"):
             with self.subTest(failure=failure):
                 self.log.unlink(missing_ok=True)
-                self.enable_retention()
+                self.enable_retention(pending=False)
                 self.env[failure] = "7"
                 result = self.run_launch("--rebuild")
                 self.assertEqual(result.returncode, 7, result.stderr)
                 self.assertNotIn("python", self.calls())
                 self.assertNotIn("<agent>", self.calls())
                 self.assertFalse((self.state / "operation.lock").exists())
+                self.assertEqual((self.state / "pending-build").exists(), failure == "BOOTSTRAP_EXIT")
                 del self.env[failure]
 
     def test_failed_first_build_does_not_create_pending_marker(self):
@@ -318,7 +303,7 @@ launch_agent claude "$@"
         self.assertFalse((self.state / "operation.lock").exists())
 
     def test_update_tool_build_defers_retention_until_next_launch(self):
-        self.enable_retention()
+        self.enable_retention(pending=False)
         result = self.run_shell("""
 WRAPPER_NAME=dclaude
 HOST_HOME="$HOME"

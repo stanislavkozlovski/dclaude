@@ -99,7 +99,7 @@ Some features:
 - Docker Desktop or Docker Engine with `docker`
 - a trusted repo
 - Docker Desktop file sharing enabled for the repo path and each configured home mount on macOS
-- host Python 3 for automatic image retention, `--space` commands, and tool-pin updates
+- host Python 3 for enabled image retention, `--space` commands, and tool-pin updates
 
 ## Option A: Homebrew
 
@@ -181,7 +181,7 @@ Wrapper options:
 - `--ssh` enables SSH agent forwarding by mounting `/run/host-services/ssh-auth.sock` and `~/.ssh/known_hosts` when available
 - `--profile NAME` (Codex only) uses a named profile with a separate `~/.codex-NAME` config directory, giving you isolated auth, state, and skills per profile
 - `--list-profiles` (Codex only) lists available Codex profiles
-- `--space` diagnoses Docker Desktop storage on macOS, previews old launcher images, and manages automatic retention; see [Docker space cleanup](docs/SPACE.md)
+- `--space` diagnoses Docker Desktop storage on macOS, previews old launcher images, and manages opt-in image retention; see [Docker space cleanup](docs/SPACE.md)
 - `--version` prints the installed launcher version without requiring Docker or a git repo
 - `--` passes the remaining arguments to the underlying CLI
 
@@ -218,17 +218,17 @@ still reached 44 GiB of `Docker.raw`: 20 GB of it in 13 unused `dclaude`
 versions, plus 27 GB reported as reclaimable build cache, most of it the same
 layers. The 460 GiB disk had 3.8 GiB left.
 
-The fix is retention: keep the newest N builds and delete the rest. `dclaude`
-does this automatically. After every image build, including the rebuild that
-follows an accepted launcher update, and at most once a day on launch, it
-deletes its own old images and the build cache only those images held. The
-newest two distinct builds stay, and so does any image a running or stopped
-container still uses. Other projects' images, all containers, volumes, and
-shared cache are never touched.
+The preventive option is opt-in image retention: keep the newest N builds and
+delete older labelled launcher images. After you enable a saved policy,
+`dclaude` runs retention only after a successful default-image build and warm
+container bootstrap, including the rebuild that follows an accepted launcher
+update. The newest builds stay, and so does any image a running or stopped
+container still uses. Automatic retention never deletes build cache,
+containers, or volumes.
 
 ```bash
-dclaude --space retention status           # on by default, keeps the newest 2 builds
-dclaude --space retention enable --keep 3  # keep more history
+dclaude --space retention status           # disabled until explicitly enabled
+dclaude --space retention enable --keep 2  # save policy for this Docker setup
 dclaude --space retention disable          # stop automatic cleanup; nothing is deleted
 ```
 
@@ -248,9 +248,10 @@ dclaude --space --help
 Cleanup preserves running and stopped containers, volumes, and protected image
 aliases. A stopped warm container keeps its image alive, so run `dclaude --stop`
 in repos you no longer use. Manual cache cleanup can affect rebuild speed for any
-project on the default builder. Automatic retention runs on macOS Docker Desktop
-and needs host Python 3; elsewhere it does nothing. The update-only `--yes` flag
-does not authorize deletion.
+project on the default builder. Enabled retention runs on macOS Docker Desktop
+and needs host Python 3; elsewhere it does nothing. Use Docker's native BuildKit
+GC budget for recurring cache eviction. The update-only `--yes` flag does not
+authorize deletion.
 
 See [Recover Docker space on a Mac](docs/SPACE.md) for all options, supported
 setups, image protections, recovery measurements, receipts, and a native Docker
@@ -461,7 +462,7 @@ dclaude --update-launcher
 dclaude --update-launcher --yes
 ```
 
-`--update-launcher` uses `git -C "$TOOL_HOME" pull --ff-only` for git-clone installs, `brew update && brew upgrade dclaude` for Homebrew installs, and prints the release URL for other install shapes. When the launcher offers an update during a normal interactive start and you accept it, it restarts itself automatically with the updated code instead of asking you to rerun the command manually. The restarted launcher builds the new image and then retires the launcher builds that fall outside the retention policy, so accepting an update does not leave the previous versions behind; see [Docker Space Cleanup](#docker-space-cleanup).
+`--update-launcher` uses `git -C "$TOOL_HOME" pull --ff-only` for git-clone installs, `brew update && brew upgrade dclaude` for Homebrew installs, and prints the release URL for other install shapes. When the launcher offers an update during a normal interactive start and you accept it, it restarts itself automatically with the updated code instead of asking you to rerun the command manually. If image retention is enabled, the restarted launcher builds the new image and then retires labelled launcher builds that fall outside the saved policy; see [Docker Space Cleanup](#docker-space-cleanup).
 
 ## Tool Pin Refreshes
 

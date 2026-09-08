@@ -76,11 +76,13 @@ host. It inventories the verified local Docker Desktop daemon and default
 references and aliases, and plans image or separately authorized cache deletion.
 Unresolved metadata disables the affected cleanup instead of broadening it.
 
-Before each apply it writes a receipt, collects required host baselines, and
-rechecks target identities and eligibility. Image removal is unforced and avoids
-parent pruning; cache removal filters approved private, reclaimable record IDs.
-The receipt records each completed action so interruption preserves partial
-results. `verify` only remeasures; receipts never execute deletion plans.
+Each apply collects one complete host baseline before authorization, writes a
+receipt before mutation, rechecks each target's action-specific identity and
+eligibility, and takes one follow-up host measurement. Image removal is unforced
+and avoids parent pruning; cache removal filters approved private, reclaimable
+record IDs. The receipt journals started, completed, skipped, and error states so
+interruption preserves partial results. `verify` only remeasures; receipts never
+execute deletion plans.
 
 Host probes use the disk-image file's allocated blocks and APFS container counters,
 deduplicated by identity. They keep image/cache accounting separate from signed
@@ -88,16 +90,15 @@ observed host recovery, record denied paths as unmeasured, and perform no direct
 walks or Docker restarts. See [the storage guide](SPACE.md) for commands, protections,
 supported setups, and validation limits.
 
-Retention is on by default and applies only to labelled history in the exact
-`dclaude` repository. It runs after both a successful image build and warm-container
-bootstrap, and at most once a day on launch as a sweep. A pending-build marker
-carries standalone tool-update builds to the next successful launch. After the
-image phase it prunes, under a second receipt, only the build-cache records that
-Docker reported as shared with an image before the deletions and private
-afterwards. A saved policy changes the keep count or disables it. Custom
-image/builder overrides and non-macOS hosts bypass it, and failures warn without
-blocking a healthy launch. Docker's native GC owns ongoing cache eviction for
-everything else; the launcher never changes Docker Engine settings.
+Retention requires a saved enabled policy for the exact `dclaude` repository and
+verified Docker binding. It runs only after both a successful default-image build
+and warm-container bootstrap. A pending-build marker carries standalone
+tool-update builds to the next successful launch and remains after a failed
+retention attempt. Automatic retention removes only positively labelled image
+history; build-cache cleanup remains separately confirmed. Custom image/builder
+overrides and non-macOS hosts bypass retention, while failures warn without
+blocking a healthy launch. Docker's native GC owns ongoing cache eviction; the
+launcher never changes Docker Engine settings.
 
 ### `scripts/dclaude.yaml.example`
 
@@ -255,11 +256,11 @@ paths are filesystem mounts:
 Host-only storage state lives under `~/.local/state/dclaude/space`, outside the
 agent auth/cache mounts. Versioned JSON (`schema_version: 1`) stores the image
 retention policy when one was saved, cleanup receipts, and the latest-receipt
-pointer. A pending-build marker holds the built image ID, and a `retention-check`
-stamp throttles launch-time sweeps. Unknown versions and inability to persist a
-receipt disable apply. Turning retention off writes a disabled policy without
-erasing receipts. A coordination lock serializes cooperating launcher lifecycle
-operations and storage mutation; it is not a Docker-wide transaction.
+pointer. A pending-build marker holds the completed build's image ID until the
+matching post-bootstrap retention succeeds. Unknown versions and inability to
+persist a receipt disable apply. Turning retention off writes a disabled policy
+without erasing receipts. A coordination lock serializes cooperating launcher
+lifecycle operations and storage mutation; it is not a Docker-wide transaction.
 
 Additional non-database runtime state:
 
