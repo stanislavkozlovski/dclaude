@@ -153,11 +153,12 @@ class Docker:
         self.binding = None
         self.path = None
         self.version = None
+        self.deadline = None
         self.report_deadline = None
 
     def api(self, method, path, query=None):
         connection = UnixConnection(self.path)
-        deadlines = [value for value in (getattr(self, "deadline", None), self.report_deadline) if value is not None]
+        deadlines = [value for value in (self.deadline, self.report_deadline) if value is not None]
         if deadlines:
             remaining = min(deadlines) - time.monotonic()
             if remaining <= 0:
@@ -287,7 +288,7 @@ class Docker:
         return self.api("POST", "/build/prune", dict(all="false", filters=json.dumps(filters)))
 
 
-def image_plan(inventory, current_image, keep=2, automatic=False):
+def image_plan(inventory, current_image, keep=DEFAULT_KEEP, automatic=False):
     """Group aliases by immutable ID; unresolved graph edges veto mutation."""
     families = {}
     issues = []
@@ -402,11 +403,13 @@ def cache_plan(inventory):
             raise SpaceError("Incomplete build-cache identity/size metadata")
         if type(record.get("InUse")) is not bool or type(record.get("Shared")) is not bool:
             raise SpaceError("Incomplete build-cache sharing/use metadata")
-        parents = record.get("Parents", record.get(" Parents", [])) or []
-        if not isinstance(parents, list) or any(not isinstance(parent, str) or not parent for parent in parents):
+        # The Engine serializes this list under " Parents": moby's JSON tag
+        # carries a leading space. The deprecated singular "Parent" may also appear.
+        parents = record.get("Parents", record.get(" Parents")) or []
+        if not isinstance(parents, list):
             raise SpaceError("Incomplete build-cache dependency metadata")
         if record.get("Parent"):
-            parents = list(parents) + [record["Parent"]]
+            parents = [*parents, record["Parent"]]
         if any(not isinstance(parent, str) or not parent for parent in parents):
             raise SpaceError("Incomplete build-cache dependency metadata")
         parents = sorted(set(parents))
@@ -515,8 +518,8 @@ def operation_lock(directory, wait_seconds=30):
     try:
         yield
     finally:
-        if (lock / "owner").exists() and (lock / "owner").read_text().strip() == owner:
-            (lock / "owner").unlink()
+        if owner_path.exists() and owner_path.read_text().strip() == owner:
+            owner_path.unlink()
             lock.rmdir()
 
 
@@ -533,9 +536,22 @@ def disabled_policy():
     return dict(schema_version=SCHEMA, enabled=False, keep=DEFAULT_KEEP, repository="dclaude", binding={})
 
 
+def plan_inventory(inventory, args, automatic=False):
+    """One planner per action; apply replans through this same function before each mutation."""
+    if args.action == "cache":
+        return cache_plan(inventory)
+    return image_plan(inventory, args.current_image, args.keep, automatic)
+
+
+def cleanup_blocked(report):
+    """Deletion needs a plan without issues and, once anything is eligible, a complete host baseline."""
+    plan, host = report["plan"], report["host"]
+    return bool(plan["issues"] or (plan["candidates"] and not host["complete"]))
+
+
 def collect(docker, host, args, automatic=False):
     inventory = docker.inventory()
-    plan = image_plan(inventory, args.current_image, args.keep, automatic) if args.action != "cache" else cache_plan(inventory)
+    plan = plan_inventory(inventory, args, automatic)
     measurement = host.snapshot(args.disk_image)
     return dict(schema_version=SCHEMA, binding=docker.binding, inventory=inventory, plan=plan, host=measurement)
 
@@ -573,9 +589,9 @@ def next_actions(wrapper, action, *, report=None, delta=None, completed=False, d
     location = f" --disk-image {shlex.quote(str(disk_image))}" if disk_image else ""
     hints = []
     if report is not None:
-        plan, host = report["plan"], report["host"]
+        plan = report["plan"]
         keep = f" --keep {plan['keep']}" if action == "images" else ""
-        if plan["candidates"] and not plan["issues"] and host["complete"]:
+        if plan["candidates"] and not cleanup_blocked(report):
             purpose = "Review image deletion" if action == "images" else "Review cache deletion (future builds may need downloads)"
             hints.append((purpose, f"{command} {action}{keep}{location} --apply"))
         else:
@@ -612,7 +628,7 @@ class ReportedError(SpaceError):
 
 def print_report(report, action, wrapper="dclaude", applying=False, disk_image=None):
     plan, host = report["plan"], report["host"]
-    blocked = bool(plan["issues"] or (plan["candidates"] and not host["complete"]))
+    blocked = cleanup_blocked(report)
     if blocked:
         result = "Cleanup blocked; nothing deleted." if applying else "Preview only; cleanup is blocked."
     elif not plan["candidates"]:
@@ -796,16 +812,18 @@ def revalidate_candidate(reviewed, plan, action, completed=()):
     return eligible
 
 
-def validate_latest(directory):
+def load_latest_receipt(directory):
+    """Resolve latest.json to its receipt, or fail closed before cleanup and verification alike."""
     latest = read_json(directory / "latest.json")
-    if latest:
-        receipt_path = Path(latest.get("receipt", ""))
-        if receipt_path.parent.resolve() != (directory / "receipts").resolve():
-            raise SpaceError("Invalid latest receipt location; mutation disabled.")
-        receipt = read_json(receipt_path)
-        if not receipt or not isinstance(receipt.get("steps"), list) or "baseline" not in receipt:
-            raise SpaceError("Incomplete latest receipt; mutation disabled.")
-    return latest
+    if not latest:
+        return None
+    receipt_path = Path(latest.get("receipt", ""))
+    if receipt_path.parent.resolve() != (directory / "receipts").resolve():
+        raise SpaceError("Invalid latest receipt location; mutation disabled.")
+    receipt = read_json(receipt_path)
+    if not receipt or not isinstance(receipt.get("steps"), list) or not {"baseline", "disk_image"} <= receipt.keys():
+        raise SpaceError("Incomplete latest receipt; mutation disabled.")
+    return receipt_path, receipt
 
 
 def validate_automatic(docker, args, directory, binding):
@@ -829,12 +847,11 @@ def validate_automatic(docker, args, directory, binding):
         raise SpaceError("The completed launcher image is not positively labelled for retention.")
     args.keep = policy["keep"]
     args.disk_image = Path(policy["disk_image"]) if policy.get("disk_image") else None
-    return pending_id
 
 
-def consume_pending_build(directory, pending_id):
-    if pending_id is not None:
-        (directory / "pending-build").unlink(missing_ok=True)
+def consume_pending_build(directory):
+    """Only a completed automatic pass retires the marker; failures keep it for a later launch."""
+    (directory / "pending-build").unlink(missing_ok=True)
 
 
 def apply_cleanup(docker, host, args, directory, automatic=False):
@@ -842,10 +859,10 @@ def apply_cleanup(docker, host, args, directory, automatic=False):
         binding = docker.connect()
         # Unknown state cannot be overwritten into a valid-looking receipt.
         if automatic:
-            pending_id = validate_automatic(docker, args, directory, binding)
+            validate_automatic(docker, args, directory, binding)
         else:
             load_policy(directory)
-        validate_latest(directory)
+        load_latest_receipt(directory)
         report = collect(docker, host, args, automatic)
         if not automatic:
             if args.action == "images":
@@ -856,12 +873,12 @@ def apply_cleanup(docker, host, args, directory, automatic=False):
                     report["cache_plan"] = dict(candidates=[], protected=[], issues=[str(exc)])
             print_report(report, args.action, args.wrapper, applying=True, disk_image=args.disk_image)
         candidates = report["plan"]["candidates"]
-        if report["plan"]["issues"] or (candidates and not report["host"]["complete"]):
+        if cleanup_blocked(report):
             error = SpaceError if automatic else ReportedError
             raise error("Cleanup blocked: complete image/cache and host baselines are required.")
         if not candidates:
             if automatic:
-                consume_pending_build(directory, pending_id)
+                consume_pending_build(directory)
             return None
         if not automatic:
             confirm(args.action, len(candidates))
@@ -884,8 +901,7 @@ def apply_cleanup(docker, host, args, directory, automatic=False):
                     if binding != receipt["binding"]:
                         raise SpaceError("Docker context/engine/builder/store changed; stopped before next mutation.")
                     fresh_inventory = docker.inventory()
-                    fresh_plan = (image_plan(fresh_inventory, args.current_image, args.keep, automatic)
-                                  if args.action == "images" else cache_plan(fresh_inventory))
+                    fresh_plan = plan_inventory(fresh_inventory, args, automatic)
                     completed = {step["target"] for step in receipt["steps"]
                                  if step.get("candidate_id") == candidate["id"] and step.get("status") == "completed"}
                     eligible = revalidate_candidate(candidate, fresh_plan, args.action, completed)
@@ -942,12 +958,12 @@ def apply_cleanup(docker, host, args, directory, automatic=False):
         receipt["after"] = host.snapshot(args.disk_image)
         receipt["delta"] = host_delta(receipt["baseline"], receipt["after"])
         save()
-        if not automatic:
+        if automatic:
+            consume_pending_build(directory)
+        else:
             skipped = sum(step["status"] == "skipped" for step in receipt["steps"])
             print_recovery(receipt["delta"], receipt_path, args.wrapper, "Cleanup complete",
                            action=args.action, disk_image=args.disk_image, skipped=skipped)
-        if automatic:
-            consume_pending_build(directory, pending_id)
         return receipt
 
 
@@ -961,7 +977,7 @@ def automatic_retention(docker, host, args, directory):
         return 0
     if platform.system() != "Darwin":
         # Automatic cleanup supports local macOS Docker Desktop; elsewhere the launcher just runs.
-        pending.unlink(missing_ok=True)
+        consume_pending_build(directory)
         return 0
     args.action = "images"
     images = apply_cleanup(docker, host, args, directory, automatic=True)
@@ -973,7 +989,7 @@ def automatic_retention(docker, host, args, directory):
           f"{', '.join(removed)} ({human_bytes(reported)} reported)", file=sys.stderr)
     delta = images.get("delta") or {}
     startup = next((c for c in delta.get("apfs", []) if "startup" in c["roles"]), None) if delta.get("measured") else None
-    receipt_path = read_json(directory / "latest.json")["receipt"]
+    receipt_path, _ = load_latest_receipt(directory)
     if startup:
         free = startup["free_bytes_delta"]
         print(f"Mac free space change {'+' if free >= 0 else '-'}{human_bytes(free)}; receipt {receipt_path}", file=sys.stderr)
@@ -1011,7 +1027,7 @@ Default output uses Result, measurements, Issues (when needed), and Next command
 See docs/SPACE.md for examples, protections, receipts, and native cache GC setup.""")
     result.add_argument("action", nargs="?", choices=["images", "cache", "verify", "retention"], default="images")
     result.add_argument("retention_action", nargs="?", choices=["enable", "status", "disable"])
-    result.add_argument("--keep", type=int, default=2, help="distinct newest launcher builds to preserve (default: 2; minimum: 1)")
+    result.add_argument("--keep", type=int, help=f"distinct newest launcher builds to preserve (default: {DEFAULT_KEEP}; minimum: 1)")
     result.add_argument("--apply", action="store_true", help="print exact targets and ask for interactive deletion consent")
     result.add_argument("--json", action="store_true", help="read-only structured inventory with byte counts and protection reasons")
     result.add_argument("--disk-image", type=Path, help="Docker.raw path from Docker Desktop Settings when moved")
@@ -1023,13 +1039,11 @@ See docs/SPACE.md for examples, protections, receipts, and native cache GC setup
 
 def main(argv=None):
     install_signal_handlers()
-    arguments = list(sys.argv[1:] if argv is None else argv)
-    args = parser().parse_args(arguments)
+    args = parser().parse_args(argv)
     try:
-        if args.keep < 1:
+        if args.keep is not None and args.keep < 1:
             raise SpaceError("--keep must be at least 1")
-        explicit_keep = any(a == "--keep" or a.startswith("--keep=") for a in arguments)
-        if explicit_keep and args.action != "images" and not (args.action == "retention" and args.retention_action == "enable"):
+        if args.keep is not None and args.action != "images" and not (args.action == "retention" and args.retention_action == "enable"):
             raise SpaceError("--keep belongs to images or retention enable")
         if args.disk_image and (args.action == "verify" or (args.action == "retention" and args.retention_action != "enable")):
             raise SpaceError("--disk-image belongs to diagnosis, cleanup, or retention enable; verify uses the receipt path")
@@ -1041,6 +1055,8 @@ def main(argv=None):
             raise SpaceError("enable/status/disable belong to retention")
         if args.action in ("retention", "verify") and args.apply:
             raise SpaceError("--apply only belongs to images or cache")
+        if args.keep is None:
+            args.keep = DEFAULT_KEEP
         directory = state_dir()
         host = HostProbe()
         if args.action == "retention" and args.retention_action != "enable":
@@ -1059,15 +1075,10 @@ def main(argv=None):
                 print_policy(saved, args.wrapper)
             return 0
         if args.action == "verify":
-            latest = read_json(directory / "latest.json")
+            latest = load_latest_receipt(directory)
             if not latest:
                 raise SpaceError("No cleanup receipt to verify")
-            receipt_path = Path(latest["receipt"])
-            if receipt_path.parent.resolve() != (directory / "receipts").resolve():
-                raise SpaceError("Invalid receipt location")
-            receipt = read_json(receipt_path)
-            if not receipt or "baseline" not in receipt or "disk_image" not in receipt:
-                raise SpaceError("Invalid receipt; verification cannot infer a baseline")
+            receipt_path, receipt = latest
             after = host.snapshot(Path(receipt["disk_image"]))
             result = dict(schema_version=SCHEMA, receipt=str(receipt_path), after=after,
                           delta=host_delta(receipt["baseline"], after))
@@ -1100,7 +1111,7 @@ def main(argv=None):
                 raise SpaceError("Retention is limited to default dclaude release images")
             with operation_lock(directory):
                 load_policy(directory)
-                validate_latest(directory)
+                load_latest_receipt(directory)
                 policy = dict(schema_version=SCHEMA, enabled=True, keep=args.keep, repository="dclaude",
                               binding=docker.binding, disk_image=baseline["disk_image"]["path"], updated_at=now())
                 write_json(directory / "policy.json", policy)

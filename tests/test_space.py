@@ -265,7 +265,10 @@ class CachePlanningTests(unittest.TestCase):
         self.assertIn("builder-wide", plan["note"])
 
     def test_dependency_order_deletes_children_before_parents(self):
-        records = [cache("parent"), cache("child", Parents=["parent"]), cache("grandchild", Parent="child")]
+        child = cache("child")
+        del child["Parents"]
+        child[" Parents"] = ["parent"]  # moby's JSON tag for the parent list carries a leading space
+        records = [cache("parent"), child, cache("grandchild", Parent="child")]
         plan = space.cache_plan(inventory(records=records))
         self.assertEqual([c["id"] for c in plan["candidates"]], ["grandchild", "child", "parent"])
 
@@ -274,8 +277,9 @@ class CachePlanningTests(unittest.TestCase):
         self.assertTrue(plan["issues"])
 
     def test_missing_sharing_or_usage_is_not_assumed_reclaimable(self):
-        for field, value in (("Shared", None), ("InUse", 0), ("Size", None), ("ID", "")):
-            with self.subTest(field=field):
+        for field, value in (("Shared", None), ("InUse", 0), ("Size", None), ("ID", ""),
+                             ("Parents", "parent"), ("Parents", [""]), ("Parent", 5)):
+            with self.subTest(field=field, value=value):
                 record = cache("a")
                 record[field] = value
                 with self.assertRaises(space.SpaceError):
@@ -706,6 +710,16 @@ class StateAndApplyTests(SpaceFixture):
         self.confirm_mock.assert_not_called()
         self.assertEqual(self.docker.deleted, [])
 
+    def test_apply_eligibility_rule_needs_issue_free_plan_and_a_baseline_only_for_candidates(self):
+        report = dict(plan=dict(candidates=[], issues=[]), host=measurement(complete=False))
+        self.assertFalse(space.cleanup_blocked(report))
+        report["plan"]["candidates"] = [dict(id=ident("a"))]
+        self.assertTrue(space.cleanup_blocked(report))
+        report["host"] = measurement()
+        self.assertFalse(space.cleanup_blocked(report))
+        report["plan"]["issues"] = ["Container image identity is unresolved."]
+        self.assertTrue(space.cleanup_blocked(report))
+
     def test_declined_confirmation_does_not_write_a_receipt_or_delete(self):
         self.confirm_mock.side_effect = space.SpaceError("cancelled")
         with self.assertRaises(space.SpaceError):
@@ -1102,10 +1116,35 @@ class CommandTests(SpaceFixture):
         self.assertTrue(json.loads(self.output.getvalue())["delta"]["measured"])
         self.assertEqual(self.docker.deleted, [])
 
-    def test_verify_rejects_receipt_outside_own_directory(self):
+    def test_receipt_outside_own_directory_blocks_verify_and_apply_alike(self):
         space.write_json(self.directory / "latest.json", dict(schema_version=1, receipt="/tmp/untrusted.json"))
         self.assertEqual(self.run_main("verify"), 2)
-        self.assertIn("Invalid receipt location", self.output.getvalue())
+        self.assertIn("receipt location", self.output.getvalue())
+        with self.assertRaisesRegex(space.SpaceError, "receipt location"):
+            self.apply()
+        self.assertEqual(self.docker.deleted, [])
+
+    def test_incomplete_latest_receipt_blocks_verify_and_apply_alike(self):
+        self.apply()
+        path = Path(json.loads((self.directory / "latest.json").read_text())["receipt"])
+        receipt = json.loads(path.read_text())
+        del receipt["disk_image"]
+        space.write_json(path, receipt)
+        self.docker.deleted.clear()
+        self.assertEqual(self.run_main("verify"), 2)
+        self.assertIn("Incomplete latest receipt", self.output.getvalue())
+        with self.assertRaisesRegex(space.SpaceError, "Incomplete latest receipt"):
+            self.apply()
+        self.assertEqual(self.docker.deleted, [])
+
+    def test_keep_defaults_and_minimum_apply_to_images_and_retention_enable(self):
+        self.assertEqual(self.run_main("images", "--json"), 0)
+        self.assertEqual(json.loads(self.output.getvalue())["plan"]["keep"], space.DEFAULT_KEEP)
+        self.assertEqual(self.run_main("retention", "enable"), 0)
+        self.assertEqual(space.load_policy(self.directory)["keep"], space.DEFAULT_KEEP)
+        self.assertEqual(self.run_main("images", "--keep", "0"), 2)
+        self.assertEqual(self.run_main("retention", "enable", "--keep=0"), 2)
+        self.assertEqual(space.load_policy(self.directory)["keep"], space.DEFAULT_KEEP)
 
     def test_retention_is_disabled_until_a_policy_is_saved(self):
         self.assertEqual(self.run_main("retention", "status", "--json"), 0)
