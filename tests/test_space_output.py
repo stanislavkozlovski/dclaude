@@ -88,13 +88,19 @@ class OutputTests(unittest.TestCase):
         self.assertIn("/receipt.json", output)
 
     def test_retention_status_is_readable_with_and_without_a_saved_policy(self):
-        disabled = render(space.print_policy, None, "dclaude")
-        self.assertIn("Disabled", disabled)
-        self.assertNotIn("Keep newest", disabled)
+        default = render(space.print_policy, None, "dclaude")
+        for text in ("Image retention enabled.", "Enabled (default)", "2 distinct builds", "once a day", "build cache"):
+            self.assertIn(text, default)
+        self.assertNotIn("Docker context", default)
+        disabled = render(space.print_policy, dict(enabled=False, keep=2, binding={}), "dclaude")
+        self.assertIn("Image retention disabled.", disabled)
+        self.assertIn("Status          Disabled", disabled)
+        self.assertNotIn("Runs after", disabled)
         policy = dict(enabled=True, keep=4, binding=dict(context="desktop-linux", builder="default"))
         enabled = render(space.print_policy, policy, "dclaude")
-        for text in ("Enabled", "4 distinct builds", "desktop-linux", "default", "status --json"):
+        for text in ("Status          Enabled\n", "4 distinct builds", "desktop-linux", "default", "status --json"):
             self.assertIn(text, enabled)
+        self.assertNotIn("(default)", enabled)
         self.assertNotIn("{", enabled)
 
     def test_followup_commands_preserve_keep_and_quote_a_moved_disk_path(self):

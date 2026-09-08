@@ -99,7 +99,7 @@ Some features:
 - Docker Desktop or Docker Engine with `docker`
 - a trusted repo
 - Docker Desktop file sharing enabled for the repo path and each configured home mount on macOS
-- host Python 3 for optional `--space` commands and tool-pin updates
+- host Python 3 for automatic image retention, `--space` commands, and tool-pin updates
 
 ## Option A: Homebrew
 
@@ -181,7 +181,7 @@ Wrapper options:
 - `--ssh` enables SSH agent forwarding by mounting `/run/host-services/ssh-auth.sock` and `~/.ssh/known_hosts` when available
 - `--profile NAME` (Codex only) uses a named profile with a separate `~/.codex-NAME` config directory, giving you isolated auth, state, and skills per profile
 - `--list-profiles` (Codex only) lists available Codex profiles
-- `--space` diagnoses Docker Desktop storage on macOS and previews old launcher images; see [Docker space cleanup](docs/SPACE.md)
+- `--space` diagnoses Docker Desktop storage on macOS, previews old launcher images, and manages automatic retention; see [Docker space cleanup](docs/SPACE.md)
 - `--version` prints the installed launcher version without requiring Docker or a git repo
 - `--` passes the remaining arguments to the underlying CLI
 
@@ -207,26 +207,50 @@ Examples:
 
 ## Docker Space Cleanup
 
-Both launchers can preview old shared images, separately clear retained builder
-cache, and measure the Mac's observed free-space change. Run from any host
-directory; no agent or target repository is needed.
+Regular use fills the disk. Every launcher release rebuilds the image, and
+releases ship most weekdays because the pinned Claude Code and Codex versions
+move that often: five or six releases a week in August 2026. Each rebuild leaves
+about 1.5 GB of layers that no other build shares, because the Dockerfile
+installs both CLIs in one layer, and BuildKit keeps those layers as build cache
+even after the image is deleted. Taking every update therefore adds roughly 8 to
+10 GB a week. One Mac that took only 15 of the 52 releases over eleven weeks
+still reached 44 GiB of `Docker.raw`: 20 GB of it in 13 unused `dclaude`
+versions, plus 27 GB reported as reclaimable build cache, most of it the same
+layers. The 460 GiB disk had 3.8 GiB left.
+
+The fix is retention: keep the newest N builds and delete the rest. `dclaude`
+does this automatically. After every image build, including the rebuild that
+follows an accepted launcher update, and at most once a day on launch, it
+deletes its own old images and the build cache only those images held. The
+newest two distinct builds stay, and so does any image a running or stopped
+container still uses. Other projects' images, all containers, volumes, and
+shared cache are never touched.
 
 ```bash
-dclaude --space                         # read-only diagnosis and image preview
+dclaude --space retention status           # on by default, keeps the newest 2 builds
+dclaude --space retention enable --keep 3  # keep more history
+dclaude --space retention disable          # stop automatic cleanup; nothing is deleted
+```
+
+Images built by launchers before this version carry no ownership label, so
+automatic retention leaves them alone. Retire them once by hand, then let
+retention take over:
+
+```bash
+dclaude --space                          # read-only diagnosis and image preview
 dclaude --space images --keep 2 --apply  # fresh plan and interactive confirmation
-dclaude --space cache                   # inspect cache after image cleanup
-dclaude --space cache --apply           # separate confirmation for builder-wide cache
-dclaude --space verify                  # remeasure the latest cleanup receipt
-dclaude --space retention enable        # opt into keeping recent labelled builds
-dclaude --space retention disable       # stop automatic image cleanup
+dclaude --space cache                    # inspect cache after image cleanup
+dclaude --space cache --apply            # separate confirmation for builder-wide cache
+dclaude --space verify                   # remeasure the latest cleanup receipt
 dclaude --space --help
 ```
 
 Cleanup preserves running and stopped containers, volumes, and protected image
-aliases. Retention is off by default and keeps at least two distinct builds;
-container references can protect more. Cache cleanup can affect rebuild speed for
-any project on the default builder. Host Python 3 is required for storage mode.
-The update-only `--yes` flag does not authorize deletion.
+aliases. A stopped warm container keeps its image alive, so run `dclaude --stop`
+in repos you no longer use. Manual cache cleanup can affect rebuild speed for any
+project on the default builder. Automatic retention runs on macOS Docker Desktop
+and needs host Python 3; elsewhere it does nothing. The update-only `--yes` flag
+does not authorize deletion.
 
 See [Recover Docker space on a Mac](docs/SPACE.md) for all options, supported
 setups, image protections, recovery measurements, receipts, and a native Docker
@@ -437,7 +461,7 @@ dclaude --update-launcher
 dclaude --update-launcher --yes
 ```
 
-`--update-launcher` uses `git -C "$TOOL_HOME" pull --ff-only` for git-clone installs, `brew update && brew upgrade dclaude` for Homebrew installs, and prints the release URL for other install shapes. When the launcher offers an update during a normal interactive start and you accept it, it restarts itself automatically with the updated code instead of asking you to rerun the command manually.
+`--update-launcher` uses `git -C "$TOOL_HOME" pull --ff-only` for git-clone installs, `brew update && brew upgrade dclaude` for Homebrew installs, and prints the release URL for other install shapes. When the launcher offers an update during a normal interactive start and you accept it, it restarts itself automatically with the updated code instead of asking you to rerun the command manually. The restarted launcher builds the new image and then retires the launcher builds that fall outside the retention policy, so accepting an update does not leave the previous versions behind; see [Docker Space Cleanup](#docker-space-cleanup).
 
 ## Tool Pin Refreshes
 

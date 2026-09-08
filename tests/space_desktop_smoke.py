@@ -187,6 +187,54 @@ def prove_exact_cache_selection(helper, report):
     }
 
 
+def prove_automatic_retention(engine, context, state, container_id, stopped, protected_tags, retired):
+    """The launcher's automatic path on real Desktop data: the newest two labelled
+    builds stay, older labelled builds go, and only the cache they held follows."""
+    global CURRENT
+    newer = make_image(context, "90.0.7", 8)
+    newest = make_image(context, "90.0.8", 8)
+    CURRENT = "dclaude:90.0.8"
+    kept = {tag: ident for tag, ident in protected_tags.items() if tag not in retired}
+    kept.update({"dclaude:90.0.7": newer, CURRENT: newest})
+    status = json.loads(space("retention", "status", "--json"))
+    assert status["enabled"] is True and status["keep"] == 2 and status["saved"] is False, status
+    assert not (state / "policy.json").exists(), "Default retention must not need a saved policy"
+    before = engine.inventory()
+    shared_before = {record["ID"] for record in before["cache"] if record["Shared"]}
+    unshared_before = {record["ID"] for record in before["cache"] if not record["Shared"]}
+    (state / "pending-build").write_text(newest + "\n")
+    output = space("--auto-retain")
+    assert "Retention removed 2 old dclaude builds" in output, output
+    assert not (state / "pending-build").exists(), "Automatic retention must consume the pending-build marker"
+    after = engine.inventory()
+    present = {image["Id"] for image in after["images"]}
+    assert not present & set(retired.values()), (retired, present)
+    for tag, ident in kept.items():
+        assert image_id(tag) == ident, f"Protected alias changed during automatic retention: {tag}"
+    assert command("docker", "inspect", "--format", "{{.Image}}", container_id).strip() == stopped
+    cache_receipt = latest_receipt()
+    assert cache_receipt["action"] == "cache", cache_receipt["action"]
+    assert cache_receipt["authority"] == "build cache released by automatic image retention", cache_receipt["authority"]
+    assert all(step["status"] == "completed" for step in cache_receipt["steps"]), cache_receipt["steps"]
+    images_receipt = json.loads(Path(cache_receipt["released_by_receipt"]).read_text())
+    assert images_receipt["action"] == "images" and images_receipt["status"] == "completed", images_receipt
+    assert {candidate["id"] for candidate in images_receipt["reviewed"]} == set(retired.values()), images_receipt["reviewed"]
+    released = images_receipt["released_cache"]
+    after_ids = {record["ID"] for record in after["cache"]}
+    assert released and set(released) <= shared_before, (released, shared_before)
+    assert not set(released) & after_ids, "Released cache records must be gone"
+    assert unshared_before <= after_ids, "Cache that was already private is outside automatic cleanup"
+    assert any(record["Shared"] for record in after["cache"]), "Cache held by remaining images must stay shared"
+    assert f"Retention cleared {len(released)} build-cache record" in output, output
+    remaining = diagnosis()
+    assert not remaining["plan"]["candidates"], remaining["plan"]["candidates"]
+    EVIDENCE["automatic_retention"] = {
+        "output": output, "retired": retired, "kept": kept, "released_cache": released,
+        "images_receipt": images_receipt, "cache_receipt": cache_receipt,
+        "shared_records_before": len(shared_before), "records_after": len(after_ids),
+    }
+
+
 def prove_incident_scale():
     """Time a real inventory with hundreds of unrelated immutable identities."""
     phase("creating 280 unrelated images for the one-minute diagnosis test")
@@ -376,6 +424,10 @@ def main():
         EVIDENCE["whole_cleanup_delta"] = delta
         assert delta["measured"] and delta["raw_allocated_bytes_reduction"] >= 64 * MIB, delta
 
+        prove_automatic_retention(engine, context, state, container_id, stopped, protected_tags,
+                                  {"dclaude:90.0.5": recent, "dclaude:90.0.6": current})
+        phase("automatic retention retired old labelled builds and only the cache they held")
+
         space("retention", "enable", "--keep", "2", confirm=True)
         policy = json.loads((state / "policy.json").read_text())
         assert policy["enabled"] and policy["keep"] == 2 and policy["repository"] == "dclaude", policy
@@ -385,6 +437,11 @@ def main():
         disabled = json.loads((state / "policy.json").read_text())
         assert disabled["enabled"] is False
         EVIDENCE["retention_policy_disabled"] = disabled
+        images_before_noop = {image["Id"] for image in engine.inventory()["images"]}
+        (state / "pending-build").write_text(image_id(CURRENT) + "\n")
+        assert "Retention" not in space("--auto-retain"), "A disabled policy must stop automatic cleanup"
+        assert {image["Id"] for image in engine.inventory()["images"]} == images_before_noop
+        (state / "pending-build").unlink()
         EVIDENCE["cleanup_checks_passed"] = True
         phase("cleanup, protected objects, host recovery, verification, and retention checks passed")
         print(json.dumps({"whole_cleanup_delta": delta}, indent=2), flush=True)

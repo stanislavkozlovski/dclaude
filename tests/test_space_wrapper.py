@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 
@@ -39,6 +40,7 @@ class SpaceWrapperTests(unittest.TestCase):
             PATH=f"{self.bin}:{os.environ['PATH']}",
             TEST_LOG=str(self.log),
             TEST_IMAGE_ID=IMAGE_ID,
+            DCLAUDE_RETENTION_INTERVAL_SECONDS="0",  # sweeps are exercised explicitly
         )
         self.executable("python3", """#!/bin/bash
 printf 'python' >> "$TEST_LOG"
@@ -111,6 +113,60 @@ launch_agent claude "$@"
             '{"schema_version": 1, "enabled": ' + str(enabled).lower() + ', "keep": 2}\n'
         )
         self.state.joinpath("pending-build").write_text(image_id + "\n")
+
+    def stamp_sweep(self, age_seconds):
+        self.state.mkdir(parents=True, exist_ok=True)
+        self.state.joinpath("retention-check").write_text(f"{int(time.time()) - age_seconds}\n")
+
+    def test_default_policy_retains_after_a_build_without_any_saved_state(self):
+        result = self.run_launch("--rebuild")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls()
+        self.assertLess(calls.index("bootstrap"), calls.index("<--auto-retain>"))
+        self.assertFalse((self.state / "policy.json").exists())
+        self.assertTrue((self.state / "retention-check").exists())
+
+    def test_sweep_runs_at_most_once_per_interval_without_a_pending_build(self):
+        self.env["DCLAUDE_RETENTION_INTERVAL_SECONDS"] = "3600"
+        result = self.run_launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls().count("<--auto-retain>"), 1)
+        stamp = int((self.state / "retention-check").read_text().strip())
+        self.assertLessEqual(abs(stamp - int(time.time())), 5)
+        result = self.run_launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls().count("<--auto-retain>"), 1)
+        self.stamp_sweep(7200)
+        result = self.run_launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls().count("<--auto-retain>"), 2)
+
+    def test_stale_pending_marker_does_not_block_a_due_sweep(self):
+        self.env["DCLAUDE_RETENTION_INTERVAL_SECONDS"] = "3600"
+        self.enable_retention(image_id="sha256:" + "b" * 64)
+        result = self.run_launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("<--auto-retain>", self.calls())
+
+    def test_disabled_policy_skips_sweeps_and_builds_without_python(self):
+        self.env["DCLAUDE_RETENTION_INTERVAL_SECONDS"] = "1"
+        self.env["PYTHON_EXIT"] = "98"
+        self.enable_retention(enabled=False)
+        for args in ((), ("--rebuild",)):
+            with self.subTest(args=args):
+                result = self.run_launch(*args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("python", self.calls())
+                self.assertFalse((self.state / "retention-check").exists())
+
+    def test_sweep_failure_names_its_trigger_and_keeps_the_launch(self):
+        self.env["DCLAUDE_RETENTION_INTERVAL_SECONDS"] = "3600"
+        self.env["PYTHON_EXIT"] = "2"
+        result = self.run_launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("automatic image retention (sweep) did not complete", result.stderr)
+        self.assertIn("dclaude --space retention status", result.stderr)
+        self.assertIn("<agent>", self.calls())
 
     def test_both_wrappers_dispatch_space_before_repo_or_docker(self):
         for wrapper in ("dclaude", "dcodex"):
@@ -212,7 +268,8 @@ launch_agent claude "$@"
 
     def test_missing_python_only_blocks_explicit_space_commands(self):
         (self.bin / "python3").unlink()
-        for name in ("bash", "tr", "dirname", "basename", "id", "mkdir", "chmod", "cat", "rm", "rmdir", "grep"):
+        for name in ("bash", "tr", "dirname", "basename", "id", "mkdir", "chmod", "cat", "rm", "rmdir", "grep",
+                     "date", "mv", "sed"):
             (self.bin / name).symlink_to(shutil.which(name))
         self.env["PATH"] = str(self.bin)
         result = self.run_launch()

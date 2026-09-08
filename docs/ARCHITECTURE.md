@@ -88,12 +88,16 @@ observed host recovery, record denied paths as unmeasured, and perform no direct
 walks or Docker restarts. See [the storage guide](SPACE.md) for commands, protections,
 supported setups, and validation limits.
 
-Retention is opt-in, applies only to labelled history in the exact `dclaude`
-repository, and runs after both a successful image build and warm-container
-bootstrap. A pending-build marker carries standalone tool-update builds to the
-next successful launch. Custom image/builder overrides bypass it, and failures
-warn without blocking a healthy launch. Docker's native GC owns ongoing cache
-eviction; the launcher never changes Docker Engine settings.
+Retention is on by default and applies only to labelled history in the exact
+`dclaude` repository. It runs after both a successful image build and warm-container
+bootstrap, and at most once a day on launch as a sweep. A pending-build marker
+carries standalone tool-update builds to the next successful launch. After the
+image phase it prunes, under a second receipt, only the build-cache records that
+Docker reported as shared with an image before the deletions and private
+afterwards. A saved policy changes the keep count or disables it. Custom
+image/builder overrides and non-macOS hosts bypass it, and failures warn without
+blocking a healthy launch. Docker's native GC owns ongoing cache eviction for
+everything else; the launcher never changes Docker Engine settings.
 
 ### `scripts/dclaude.yaml.example`
 
@@ -250,12 +254,12 @@ paths are filesystem mounts:
 
 Host-only storage state lives under `~/.local/state/dclaude/space`, outside the
 agent auth/cache mounts. Versioned JSON (`schema_version: 1`) stores the image
-retention policy, cleanup receipts, and latest-receipt pointer. A pending-build
-marker holds the built image ID. Unknown versions and inability to persist a
-receipt disable apply. Turning
-retention off changes the policy without erasing receipts. A coordination lock
-serializes cooperating launcher lifecycle operations and storage mutation; it is
-not a Docker-wide transaction.
+retention policy when one was saved, cleanup receipts, and the latest-receipt
+pointer. A pending-build marker holds the built image ID, and a `retention-check`
+stamp throttles launch-time sweeps. Unknown versions and inability to persist a
+receipt disable apply. Turning retention off writes a disabled policy without
+erasing receipts. A coordination lock serializes cooperating launcher lifecycle
+operations and storage mutation; it is not a Docker-wide transaction.
 
 Additional non-database runtime state:
 

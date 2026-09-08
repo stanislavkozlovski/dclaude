@@ -79,6 +79,7 @@ class FakeDocker:
         self.inventory_hooks = {}
         self.connect_hook = None
         self.delete_hook = None
+        self.held = {}  # image ID -> cache record IDs whose layers that image references
 
     def connect(self):
         self.connect_count += 1
@@ -101,11 +102,21 @@ class FakeDocker:
                 item["RepoTags"].remove(target)
                 if not item["RepoTags"]:
                     self.contents["images"].remove(item)
+                    self.release_cache()
                 return [{"Untagged": target}]
             if target == item["Id"]:
                 self.contents["images"].remove(item)
+                self.release_cache()
                 return [{"Deleted": target}]
         raise space.SpaceError("missing image")
+
+    def release_cache(self):
+        """Model BuildKit: a record stays shared while any remaining image references its layers."""
+        remaining = {item["Id"] for item in self.contents["images"]}
+        for record in self.contents["cache"]:
+            holders = {image_id for image_id, ids in self.held.items() if record["ID"] in ids}
+            if holders and not holders & remaining:
+                record["Shared"] = False
 
     def delete_cache(self, target):
         self.deleted.append(target)
@@ -922,7 +933,8 @@ class CommandTests(SpaceFixture):
     def run_main(self, *args):
         with patch.object(space, "Docker", return_value=self.docker), patch.object(space, "HostProbe", return_value=self.host), \
                 patch.object(space, "state_dir", return_value=self.directory), contextlib.redirect_stdout(self.output), \
-                contextlib.redirect_stderr(self.output):
+                contextlib.redirect_stderr(self.output), \
+                patch.object(space.platform, "system", return_value=getattr(self, "platform", "Darwin")):
             return space.main(["--current-image", "dclaude:0.0.9", *args])
 
     def test_missing_current_with_container_protections_is_successful_noop(self):
@@ -1034,15 +1046,101 @@ class CommandTests(SpaceFixture):
         self.assertEqual(self.run_main("verify"), 2)
         self.assertIn("Invalid receipt location", self.output.getvalue())
 
-    def test_auto_retention_needs_matching_pending_build_and_policy_binding(self):
-        self.policy(binding=dict(self.docker.binding, daemon_id="other"))
+    def test_retention_is_enabled_by_default_and_keeps_two_builds(self):
+        self.assertEqual(self.run_main("retention", "status", "--json"), 0)
+        status = json.loads(self.output.getvalue())
+        self.assertEqual((status["enabled"], status["keep"], status["saved"]), (True, 2, False))
+        self.assertFalse((self.directory / "policy.json").exists())
+        self.output = io.StringIO()
+        self.assertEqual(self.run_main("retention", "status"), 0)
+        self.assertIn("Enabled (default)", self.output.getvalue())
+        self.assertEqual(self.docker.connect_count, 0)
+
+    def test_retention_disable_without_a_saved_policy_persists_and_stops_automatic_runs(self):
+        self.assertEqual(self.run_main("retention", "disable"), 0)
+        policy = space.load_policy(self.directory)
+        self.assertEqual((policy["enabled"], policy["keep"], policy["repository"]), (False, 2, "dclaude"))
+        self.docker.contents = inventory([image("a", "0.0.1"), image("b", "0.0.2", created=2), image("f", "0.0.9", created=9)])
         (self.directory / "pending-build").write_text(ident("f") + "\n")
-        self.assertEqual(self.run_main("--auto-retain"), 2)
+        self.assertEqual(self.run_main("--auto-retain"), 0)
         self.assertEqual(self.docker.deleted, [])
+        self.assertEqual(self.docker.connect_count, 0)
+        self.assertTrue((self.directory / "pending-build").exists())
+        self.assertEqual(self.run_main("retention", "enable"), 0)
+        self.assertTrue(space.load_policy(self.directory)["enabled"])
+
+    def test_auto_retention_runs_by_default_after_a_build_and_reports_what_it_removed(self):
+        self.docker.contents = inventory([image("a", "0.0.1"), image("b", "0.0.2", created=2), image("f", "0.0.9", created=9)])
+        self.directory.mkdir()
+        (self.directory / "pending-build").write_text(ident("f") + "\n")
+        self.assertEqual(self.run_main("--auto-retain"), 0)
+        self.assertEqual(self.docker.deleted, ["dclaude:0.0.1"])
+        self.confirm_mock.assert_not_called()
+        self.assertFalse((self.directory / "pending-build").exists())
+        self.assertFalse((self.directory / "policy.json").exists())
+        output = self.output.getvalue()
+        self.assertIn("Retention removed 1 old dclaude build: dclaude:0.0.1", output)
+        self.assertIn("receipt", output)
+        self.assertEqual(self.receipt()["authority"], "enabled retention policy")
+
+    def test_auto_retention_sweeps_without_a_pending_build_and_survives_binding_changes(self):
+        self.policy(binding=dict(self.docker.binding, daemon_id="reinstalled-desktop"))
+        self.assertEqual(self.run_main("--auto-retain"), 0)
+        self.assertEqual(self.docker.deleted, ["dclaude:0.0.1"])
+        self.assertFalse((self.directory / "pending-build").exists())
+
+    def test_auto_retention_consumes_a_stale_pending_marker_after_success(self):
         self.policy()
         (self.directory / "pending-build").write_text(ident("b") + "\n")
+        self.assertEqual(self.run_main("--auto-retain"), 0)
+        self.assertEqual(self.docker.deleted, ["dclaude:0.0.1"])
+        self.assertFalse((self.directory / "pending-build").exists())
+
+    def test_auto_retention_is_a_silent_noop_off_macos(self):
+        self.platform = "Linux"
+        self.directory.mkdir()
+        (self.directory / "pending-build").write_text(ident("f") + "\n")
+        self.assertEqual(self.run_main("--auto-retain"), 0)
+        self.assertEqual(self.output.getvalue(), "")
+        self.assertEqual(self.docker.connect_count, 0)
+        self.assertFalse((self.directory / "pending-build").exists())
+
+    def test_auto_retention_prunes_only_the_cache_its_own_image_deletions_released(self):
+        records = [cache("child-a", Shared=True, Parents=["held-a"]), cache("held-a", Shared=True),
+                   cache("held-f", Shared=True), cache("private-x"), cache("busy-a", Shared=True, InUse=True)]
+        self.docker.contents = inventory(records=records)
+        self.docker.held = {ident("a"): ["child-a", "held-a", "busy-a"], ident("f"): ["held-f"]}
+        self.policy()
+        (self.directory / "pending-build").write_text(ident("f") + "\n")
+        self.assertEqual(self.run_main("--auto-retain"), 0)
+        self.assertEqual(self.docker.deleted, ["dclaude:0.0.1", "child-a", "held-a"])
+        self.assertEqual({record["ID"] for record in self.docker.contents["cache"]}, {"held-f", "private-x", "busy-a"})
+        cache_receipt = self.receipt()
+        self.assertEqual(cache_receipt["action"], "cache")
+        self.assertEqual(cache_receipt["authority"], "build cache released by automatic image retention")
+        images_receipt = json.loads(Path(cache_receipt["released_by_receipt"]).read_text())
+        self.assertEqual((images_receipt["action"], images_receipt["status"]), ("images", "completed"))
+        self.assertEqual(images_receipt["released_cache"], ["child-a", "held-a"])
+        self.assertFalse((self.directory / "pending-build").exists())
+        output = self.output.getvalue()
+        self.assertIn("Retention removed 1 old dclaude build: dclaude:0.0.1", output)
+        self.assertIn("Retention cleared 2 build-cache records those builds held", output)
+
+    def test_auto_retention_cache_failure_keeps_image_results_and_reports(self):
+        self.docker.contents = inventory(records=[cache("held-a", Shared=True)])
+        self.docker.held = {ident("a"): ["held-a"]}
+        self.policy()
+        (self.directory / "pending-build").write_text(ident("f") + "\n")
+
+        def fail_cache(docker, target):
+            if target == "held-a":
+                raise space.SpaceError("busy record")
+        self.docker.delete_hook = fail_cache
         self.assertEqual(self.run_main("--auto-retain"), 2)
-        self.assertEqual(self.docker.deleted, [])
+        self.assertEqual(self.docker.deleted, ["dclaude:0.0.1", "held-a"])
+        self.assertFalse((self.directory / "pending-build").exists())
+        self.assertEqual(self.receipt()["status"], "partial")
+        self.assertIn("Automatic retention stopped: busy record", self.output.getvalue())
 
     def test_auto_retention_consumes_pending_only_after_success(self):
         self.policy()

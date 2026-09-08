@@ -30,6 +30,7 @@ SCHEMA = 1
 LABEL = "com.dclaude.managed"
 RELEASE = re.compile(r"^dclaude:(\d+\.\d+\.\d+)$")
 IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
+DEFAULT_KEEP = 2
 
 
 
@@ -506,6 +507,15 @@ def load_policy(directory):
     return policy
 
 
+def default_policy():
+    """Retention is on unless a saved policy turns it off; the newest builds always stay."""
+    return dict(schema_version=SCHEMA, enabled=True, keep=DEFAULT_KEEP, repository="dclaude", binding={})
+
+
+def effective_policy(directory):
+    return load_policy(directory) or default_policy()
+
+
 def collect(docker, host, args, automatic=False):
     inventory = docker.inventory()
     plan = image_plan(inventory, args.current_image, args.keep, automatic) if args.action != "cache" else cache_plan(inventory)
@@ -564,7 +574,7 @@ def next_actions(wrapper, action, *, report=None, delta=None, completed=False, d
             hints.append(("Review cache after image cleanup", f"{command} cache{location}"))
         hints.append(("Inspect recovery measurements", f"{command} verify --json"))
     elif action == "retention":
-        hints.append(("Inspect the saved policy", f"{command} retention status --json"))
+        hints.append(("Inspect the policy as JSON", f"{command} retention status --json"))
     return hints[:3]
 
 
@@ -708,15 +718,20 @@ def print_recovery(delta, receipt_path, wrapper, title="Verification", *, action
 
 
 def print_policy(policy, wrapper):
-    print_result("Image retention enabled." if policy and policy["enabled"] else "Image retention disabled.")
+    saved = policy is not None
+    policy = policy or default_policy()
+    print_result("Image retention enabled." if policy["enabled"] else "Image retention disabled.")
     print("\nPolicy")
-    row("Status", "Enabled" if policy and policy["enabled"] else "Disabled")
-    if policy:
-        row("Keep newest", f"{policy['keep']} distinct builds")
-        row("Docker context", policy["binding"]["context"])
-        row("Builder", policy["binding"]["builder"])
-    if policy and policy["enabled"]:
-        print("\nRuns after successful build and startup. Only labelled dclaude images are eligible.")
+    row("Status", ("Enabled" if policy["enabled"] else "Disabled") + ("" if saved else " (default)"))
+    row("Keep newest", f"{policy['keep']} distinct builds")
+    binding = policy.get("binding") or {}
+    if binding.get("context"):
+        row("Docker context", binding["context"])
+    if binding.get("builder"):
+        row("Builder", binding["builder"])
+    if policy["enabled"]:
+        print("\nRuns after each launcher image build and at most once a day on launch.")
+        print("Retires labelled dclaude builds beyond the newest ones, then the build cache only they held.")
         print("Current images, container references and tags used elsewhere stay protected.")
     print_next(next_actions(wrapper, "retention"))
 
@@ -763,34 +778,52 @@ def inventory_signature(inventory):
     return json.dumps(canonical({key: inventory[key] for key in ("images", "containers", "cache")}), sort_keys=True)
 
 
-def validate_automatic(docker, args, directory):
-    policy = load_policy(directory)
-    if not policy or not policy["enabled"] or policy["binding"] != docker.binding:
-        raise SpaceError("Retention was disabled or its Docker binding changed; no cleanup performed.")
+def validate_automatic(args, directory):
+    """Automatic runs follow the effective policy. The pending-build marker only
+    records which launcher build is waiting; it is consumed after a success."""
+    policy = effective_policy(directory)
+    if not policy["enabled"]:
+        raise SpaceError("Retention is disabled; no cleanup performed.")
     if not RELEASE.fullmatch(args.current_image):
         raise SpaceError("Retention only manages default dclaude release images")
     pending = directory / "pending-build"
-    if not pending.exists():
-        raise SpaceError("No successful build is pending retention")
-    pending_id = pending.read_text().strip()
-    current = docker.api("GET", f"/images/{quote(args.current_image, safe='')}/json")
-    if current.get("Id") != pending_id or (current.get("Config", {}).get("Labels") or {}).get(LABEL) != "true":
-        raise SpaceError("Pending build does not match the current labelled launcher image")
+    pending_id = pending.read_text().strip() if pending.exists() else None
     args.keep = policy["keep"]
-    args.disk_image = Path(policy["disk_image"])
+    args.disk_image = Path(policy["disk_image"]) if policy.get("disk_image") else None
     return pending_id
 
 
-def apply_cleanup(docker, host, args, directory, automatic=False):
+def consume_pending_build(directory, pending_id):
+    if pending_id is not None:
+        (directory / "pending-build").unlink(missing_ok=True)
+
+
+def released_cache_ids(before_records, after_inventory):
+    """Cache that only the deleted images kept alive: shared with an image before
+    the deletions, private and unused afterwards. Records that were already
+    private may belong to other projects and stay outside automatic cleanup."""
+    shared_before = {record.get("ID") for record in before_records if record.get("Shared") is True}
+    try:
+        plan = cache_plan(after_inventory)
+    except SpaceError:
+        return []
+    if plan["issues"]:
+        return []
+    return [candidate["id"] for candidate in plan["candidates"] if candidate["id"] in shared_before]
+
+
+def apply_cleanup(docker, host, args, directory, automatic=False, restrict=None, provenance=None):
     with operation_lock(directory):
         docker.connect()
         # Unknown state cannot be overwritten into a valid-looking receipt.
         if automatic:
-            pending_id = validate_automatic(docker, args, directory)
+            pending_id = validate_automatic(args, directory)
         else:
             load_policy(directory)
         validate_latest(directory)
         report = collect(docker, host, args, automatic)
+        if restrict is not None:
+            report["plan"]["candidates"] = [c for c in report["plan"]["candidates"] if c["id"] in restrict]
         if not automatic:
             if args.action == "images":
                 # Cache hints are presentation only; cache metadata cannot alter image eligibility.
@@ -805,7 +838,7 @@ def apply_cleanup(docker, host, args, directory, automatic=False):
             raise error("Cleanup blocked: complete image/cache and host baselines are required.")
         if not candidates:
             if automatic:
-                (directory / "pending-build").unlink()
+                consume_pending_build(directory, pending_id)
             return None
         if not automatic:
             confirm(args.action, len(candidates))
@@ -813,6 +846,7 @@ def apply_cleanup(docker, host, args, directory, automatic=False):
                        binding=docker.binding, disk_image=report["host"]["disk_image"]["path"],
                        baseline=report["host"], steps=[], reviewed=candidates,
                        authority="enabled retention policy" if automatic else "interactive exact target confirmation")
+        receipt.update(provenance or {})
         receipt_path = directory / "receipts" / (dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + ".json")
 
         def save():
@@ -888,7 +922,11 @@ def apply_cleanup(docker, host, args, directory, automatic=False):
                     save()
             # Recheck cache after image deletion: shared/private status changes.
             receipt["after_inventory"] = docker.inventory()
-            deadline = time.monotonic() + 60
+            if automatic and args.action == "images":
+                receipt["released_cache"] = released_cache_ids(report["inventory"]["cache"], receipt["after_inventory"])
+            # A launch is waiting behind automatic runs; Docker documents
+            # reclamation within seconds, and verify can remeasure later.
+            deadline = time.monotonic() + (10 if automatic else 60)
             while True:
                 receipt["after"] = host.snapshot(args.disk_image)
                 receipt["delta"] = host_delta(receipt["baseline"], receipt["after"])
@@ -912,10 +950,48 @@ def apply_cleanup(docker, host, args, directory, automatic=False):
             print_recovery(receipt["delta"], receipt_path, args.wrapper, "Cleanup complete",
                            action=args.action, disk_image=args.disk_image, skipped=skipped)
         if automatic:
-            pending = directory / "pending-build"
-            if pending.read_text().strip() == pending_id:
-                pending.unlink()
+            consume_pending_build(directory, pending_id)
         return receipt
+
+
+def automatic_retention(docker, host, args, directory):
+    """Launcher-triggered cleanup: old labelled builds first, then only the cache they held."""
+    if not effective_policy(directory)["enabled"]:
+        return 0
+    if platform.system() != "Darwin":
+        # Automatic cleanup supports local macOS Docker Desktop; elsewhere the launcher just runs.
+        (directory / "pending-build").unlink(missing_ok=True)
+        return 0
+    args.action = "images"
+    images = apply_cleanup(docker, host, args, directory, automatic=True)
+    if images is None:
+        return 0
+    images_path = read_json(directory / "latest.json")["receipt"]
+    removed = [step["target"] for step in images["steps"] if step.get("status") == "completed"]
+    reported = sum(candidate["size_bytes"] for candidate in images["reviewed"])
+    print(f"Retention removed {len(removed)} old dclaude build{'' if len(removed) == 1 else 's'}: "
+          f"{', '.join(removed)} ({human_bytes(reported)} reported)", file=sys.stderr)
+    cache = None
+    released = images.get("released_cache") or []
+    if released:
+        args.action = "cache"
+        cache = apply_cleanup(docker, host, args, directory, automatic=True, restrict=set(released),
+                              provenance=dict(authority="build cache released by automatic image retention",
+                                              released_by_receipt=images_path))
+    if cache:
+        cleared = [step for step in cache["steps"] if step.get("status") == "completed"]
+        reported = sum(candidate["size_bytes"] for candidate in cache["reviewed"])
+        print(f"Retention cleared {len(cleared)} build-cache record{'' if len(cleared) == 1 else 's'} "
+              f"those builds held ({human_bytes(reported)} reported)", file=sys.stderr)
+    delta = (cache or images).get("delta") or {}
+    startup = next((c for c in delta.get("apfs", []) if "startup" in c["roles"]), None) if delta.get("measured") else None
+    receipt_path = read_json(directory / "latest.json")["receipt"]
+    if startup:
+        free = startup["free_bytes_delta"]
+        print(f"Mac free space change {'+' if free >= 0 else '-'}{human_bytes(free)}; receipt {receipt_path}", file=sys.stderr)
+    else:
+        print(f"Recovery unmeasured; run {args.wrapper} --space verify later. Receipt {receipt_path}", file=sys.stderr)
+    return 0
 
 
 def parser():
@@ -926,15 +1002,19 @@ def parser():
   cache                  Preview private unused default-builder cache records.
   cache --apply          Confirm separate builder-wide cache deletion.
   verify                 Remeasure the latest receipt; never delete anything.
-  retention enable       Enable labelled-image retention after build/bootstrap.
-  retention status       Show the saved image policy.
-  retention disable      Stop automatic image cleanup; retain all history.
+  retention status       Show the image policy; retention is on by default.
+  retention enable       Save a keep count or disk-image path for automatic retention.
+  retention disable      Stop automatic image and cache cleanup; retain all history.
 
+Retention keeps the newest 2 launcher builds and runs after each image build
+and at most once a day on launch. It retires older labelled dclaude images and
+only the build cache those images held. Images built by older launchers carry no
+label; retire them once with images --apply.
 Requires host Python 3 and local macOS Docker Desktop with Engine API 1.48+
 for storage operations.
-Runs before repository lookup, builds, updates, or agent startup. Ordinary
-launches need no new Python installation. --apply requires a terminal; --yes
-only authorizes launcher updates. Other Docker clients must be idle.
+Runs before repository lookup, builds, updates, or agent startup. Launches
+without host Python 3 skip automatic retention with a warning. --apply requires
+a terminal; --yes only authorizes launcher updates. Other Docker clients must be idle.
 For moved Docker.raw files use --disk-image PATH from Desktop Settings.
 Default output uses Result, measurements, Issues (when needed), and Next commands.
 --json includes full IDs, references, and bytes.
@@ -975,19 +1055,19 @@ def main(argv=None):
         directory = state_dir()
         host = HostProbe()
         if args.action == "retention" and args.retention_action != "enable":
-            policy = load_policy(directory)
+            saved = load_policy(directory)
             if args.retention_action == "disable":
-                if policy:
-                    with operation_lock(directory):
-                        policy = load_policy(directory)
-                        policy["enabled"] = False
-                        write_json(directory / "policy.json", policy)
+                with operation_lock(directory):
+                    policy = load_policy(directory) or default_policy()
+                    policy["enabled"] = False
+                    policy["updated_at"] = now()
+                    write_json(directory / "policy.json", policy)
                 print_result("Image retention disabled. Nothing deleted.")
                 print_next(next_actions(args.wrapper, "retention"))
             elif args.json:
-                print(json.dumps(policy or dict(schema_version=SCHEMA, enabled=False), indent=2))
+                print(json.dumps(dict(saved or default_policy(), saved=saved is not None), indent=2))
             else:
-                print_policy(policy, args.wrapper)
+                print_policy(saved, args.wrapper)
             return 0
         if args.action == "verify":
             latest = read_json(directory / "latest.json")
@@ -1020,6 +1100,8 @@ def main(argv=None):
             docker.runner = bounded_run
             docker.report_deadline = deadline
             host.runner = bounded_run
+        if args.auto_retain:
+            return automatic_retention(docker, host, args, directory)
         docker.connect()
         if args.action == "retention":
             baseline = host.snapshot(args.disk_image)
@@ -1035,13 +1117,6 @@ def main(argv=None):
                 write_json(directory / "policy.json", policy)
             print_policy(policy, args.wrapper)
             return 0
-        if args.auto_retain:
-            policy = load_policy(directory)
-            if not policy or not policy["enabled"]:
-                return 0
-            args.action = "images"
-            apply_cleanup(docker, host, args, directory, automatic=True)
-            return 0
         if args.apply:
             apply_cleanup(docker, host, args, directory)
         else:
@@ -1056,6 +1131,8 @@ def main(argv=None):
     except (SpaceError, OSError, ValueError, KeyError, TypeError) as exc:
         if args.json:
             print(json.dumps(dict(schema_version=SCHEMA, error=str(exc), mutation_allowed=False)))
+        elif args.auto_retain:
+            print(f"Automatic retention stopped: {exc}", file=sys.stderr)
         elif not isinstance(exc, ReportedError):
             print(f"Result\n  Command failed.\n\nIssues\n  {exc}", file=sys.stderr)
         return 2

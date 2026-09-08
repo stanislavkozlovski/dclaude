@@ -54,7 +54,12 @@ jobs:
           echo "cb22c74b9c6c9c2768d64459828b6c2b0ab4d5b7ace4b28f0979d7de4f28e336  $RUNNER_TEMP/Docker.dmg" | shasum -a 256 -c -
           sudo hdiutil attach "$RUNNER_TEMP/Docker.dmg" -nobrowse
           sudo /Volumes/Docker/Docker.app/Contents/MacOS/install --accept-license --user="$USER"
-          sudo hdiutil detach /Volumes/Docker
+          # The installer can hold the volume briefly; a mounted installer image
+          # does not affect the Desktop daemon under test.
+          sudo hdiutil detach /Volumes/Docker || {
+            sleep 15
+            sudo hdiutil detach /Volumes/Docker -force || echo 'warning: installer image still mounted' >&2
+          }
           echo /Applications/Docker.app/Contents/Resources/bin >> "$GITHUB_PATH"
       - name: Start Docker Desktop
         run: |

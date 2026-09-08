@@ -4,9 +4,17 @@
 build cache, and measure how much space the Mac actually gains. `dcodex --space`
 provides the same commands because both launchers use the same images.
 
+Day to day you should not need any of this: image retention is on by default,
+and the launcher retires its own old builds and the build cache they held after
+each image build and at most once a day on launch. See [Prevent old builds from
+accumulating](#prevent-old-builds-from-accumulating). The manual commands matter
+for history built before launchers labelled their images, for cache from other
+sources, and for measuring what a cleanup actually returned.
+
 Run these commands in your **host terminal**, from any directory. Storage mode
 does not launch an agent, build an image, update the launcher, or need a target
-Git repository. It needs host Python 3; ordinary agent launches do not.
+Git repository. It needs host Python 3; ordinary agent launches only use it for
+the automatic retention described below.
 `dclaude --space --help` explains the commands without contacting Docker.
 
 ## Start with a preview
@@ -256,11 +264,11 @@ Next
     dclaude --space verify --json
 ```
 
-### Enable or inspect retention
+### Inspect or adjust retention
 
 ```bash
-dclaude --space retention enable --keep 2
 dclaude --space retention status
+dclaude --space retention enable --keep 3
 ```
 
 ```text
@@ -268,18 +276,21 @@ Result
   Image retention enabled.
 
 Policy
-  Status          Enabled
+  Status          Enabled (default)
   Keep newest     2 distinct builds
-  Docker context  desktop-linux
-  Builder         desktop-linux
 
-Runs after successful build and startup. Only labelled dclaude images are eligible.
+Runs after each launcher image build and at most once a day on launch.
+Retires labelled dclaude builds beyond the newest ones, then the build cache only they held.
 Current images, container references and tags used elsewhere stay protected.
 
 Next
-  Inspect the saved policy:
+  Inspect the policy as JSON:
     dclaude --space retention status --json
 ```
+
+`retention enable` saves the keep count and the disk-image path; the status then
+reads `Enabled` and also shows the Docker context and builder it was saved
+against.
 
 ### Disable retention
 
@@ -292,7 +303,7 @@ Result
   Image retention disabled. Nothing deleted.
 
 Next
-  Inspect the saved policy:
+  Inspect the policy as JSON:
     dclaude --space retention status --json
 ```
 
@@ -360,9 +371,9 @@ Both `dclaude` and `dcodex` accept the following:
 | `--space cache` | Preview eligible default-builder cache records. |
 | `--space cache --apply` | Replan, confirm separately, delete approved cache records, and measure recovery. |
 | `--space verify` | Remeasure the latest cleanup receipt; delete nothing. |
-| `--space retention enable` | Opt into image retention after successful launcher builds and warm-container bootstrap. |
-| `--space retention status` | Show the saved image policy. |
-| `--space retention disable` | Stop future automatic cleanup; preserve history. |
+| `--space retention status` | Show the image retention policy; it is on by default. |
+| `--space retention enable` | Save a keep count or disk-image path for automatic retention, or turn it back on. |
+| `--space retention disable` | Stop future automatic image and cache cleanup; preserve history. |
 | `--keep N` | For image previews/applies or retention enable, retain the newest N distinct launcher builds; default 2, minimum 1. Protections can retain more. |
 | `--disk-image PATH` | Supply the Docker Desktop disk-image location for image/cache commands or retention enable. `verify` uses the receipt's saved path. |
 | `--json` | Emit read-only structured output for image/cache previews, verify, or retention status. Rejects `--apply` and retention enable/disable. |
@@ -458,34 +469,58 @@ guidance](https://docs.docker.com/desktop/troubleshoot-and-support/faqs/macfaqs/
 
 ## Prevent old builds from accumulating
 
-Image retention is off until you enable it:
+Image retention is on by default and needs no setup:
 
 ```bash
-dclaude --space retention enable --keep 2
 dclaude --space retention status
 ```
 
-Enabling displays and saves the policy for the exact `dclaude` repository. Once a
-launcher image build and warm-container bootstrap both succeed, the launcher can
-retire eligible labelled history under that policy. A standalone `--update-tool`
-build waits until the next successful launch. Reusing a warm container does not
-turn every agent session into a general cleanup job.
+Every launcher image build carries ownership labels. Once a build and the
+warm-container bootstrap both succeed, including the rebuild that follows an
+accepted launcher update, the launcher retires labelled `dclaude` builds outside
+the newest two and then the build cache that only those builds held. A cache
+record counts as held by a build when Docker reported it shared with an image
+before the deletions and private, unused and reclaimable afterwards; cache that
+was already private may belong to another project and is left alone. The same
+cleanup also runs at most once a day on launch, so a build that ended without a
+launch (`--update-tool`) or a cleanup that was blocked at the time still catches
+up. Set `DCLAUDE_RETENTION_INTERVAL_SECONDS` to change that interval, or to `0`
+to run only after builds. Reusing a warm container does not turn every agent
+session into a general cleanup job.
 
-Explicit `DCLAUDE_IMAGE_NAME` or `DCLAUDE_VERSION` overrides bypass ownership
-labelling and automatic retention, even when they name the default image.
-`BUILDX_BUILDER` overrides and `DOCKER_BUILDKIT=0` also bypass automatic retention.
-Cleanup failure produces a warning and does not prevent a healthy agent launch.
-Container protections, old unlabelled builds, and volumes can still use space;
-retention does not expire environments or impose a total Docker size cap.
+Each automatic run prints what it removed and where its receipt is:
 
-To stop automatic image cleanup:
+```text
+Retention removed 1 old dclaude build: dclaude:0.1.84 (1.7 GiB reported)
+Retention cleared 3 build-cache records those builds held (1.6 GiB reported)
+Mac free space change +1.6 GiB; receipt /Users/you/.local/state/dclaude/space/receipts/20260908T094500.json
+```
+
+The image and cache phases write separate receipts; the cache receipt names the
+image receipt it followed, and `dclaude --space verify` remeasures the latest one.
+
+Adjust or stop it:
 
 ```bash
+dclaude --space retention enable --keep 3
 dclaude --space retention disable
 ```
 
-Disabling does not delete images or erase receipts. Existing launches and manual
-previews continue to work.
+`retention enable` saves the keep count for the exact `dclaude` repository, plus
+the disk-image path when you pass `--disk-image`. Disabling saves a policy that
+turns automatic cleanup off; it does not delete images or erase receipts, and
+manual previews continue to work.
+
+Explicit `DCLAUDE_IMAGE_NAME` or `DCLAUDE_VERSION` overrides bypass ownership
+labelling and automatic retention, even when they name the default image.
+`BUILDX_BUILDER` overrides and `DOCKER_BUILDKIT=0` also bypass it, as do Linux
+hosts and any Docker setup outside the supported local Desktop daemon; there the
+launcher simply starts the agent. Cleanup failure produces a warning and does not
+prevent a healthy agent launch. Images built by launchers before labels existed,
+container protections, and volumes can still use space: retire legacy images once
+with `dclaude --space images --keep 2 --apply`, run `dclaude --stop` in repos you
+no longer use, and note that retention does not expire environments or impose a
+total Docker size cap.
 
 ### Give Docker its own cache budget
 
@@ -549,7 +584,9 @@ proof that apply is supported.
 CI combines controlled unit and wrapper tests with real macOS filesystem/APFS
 probes and a disposable Docker Desktop installation. The Desktop scenario creates
 its own images and cache records, checks protected images and containers, exercises
-cleanup and retention commands, and measures actual disk-image recovery. It also
+cleanup and retention commands, runs the automatic retention path against freshly
+built labelled images to check that only the cache those images held is released,
+and measures actual disk-image recovery. It also
 checks exact cache-ID selection while preserving the parent and every other cache
 record. Controlled tests cover refused operations, changing metadata, interrupted
 applies, and receipts.
