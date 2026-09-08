@@ -495,8 +495,16 @@ def operation_lock(directory, wait_seconds=30):
                 raise SpaceError(f"Docker space operation is busy: {lock}; retry when its owner finishes. Stale locks require manual inspection.")
             time.sleep(0.2)
     owner = str(os.getpid())
+    owner_path = lock / "owner"
     try:
-        (lock / "owner").write_text(owner + "\n")
+        owner_path.write_text(owner + "\n")
+    except BaseException:
+        with contextlib.suppress(OSError):
+            owner_path.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            lock.rmdir()
+        raise
+    try:
         yield
     finally:
         if (lock / "owner").exists() and (lock / "owner").read_text().strip() == owner:

@@ -942,6 +942,18 @@ class StateAndApplyTests(SpaceFixture):
                 raise RuntimeError("test")
         self.assertFalse((self.directory / "operation.lock").exists())
 
+    def test_owner_write_failure_removes_new_lock_and_propagates(self):
+        failure = OSError("disk full")
+        def leave_partial_owner(path, *_args, **_kwargs):
+            path.write_bytes(b"partial owner")
+            raise failure
+        with patch.object(Path, "write_text", autospec=True, side_effect=leave_partial_owner):
+            with self.assertRaises(OSError) as caught:
+                with space.operation_lock(self.directory):
+                    self.fail("owner write failure yielded the lock")
+        self.assertIs(caught.exception, failure)
+        self.assertFalse((self.directory / "operation.lock").exists())
+
     def test_symlink_state_is_rejected(self):
         target = Path(self.temp.name) / "target"
         target.mkdir()
