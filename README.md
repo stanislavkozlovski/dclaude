@@ -99,6 +99,7 @@ Some features:
 - Docker Desktop or Docker Engine with `docker`
 - a trusted repo
 - Docker Desktop file sharing enabled for the repo path and each configured home mount on macOS
+- host Python 3 for enabled image retention, `--space` commands, and tool-pin updates
 
 ## Option A: Homebrew
 
@@ -180,6 +181,7 @@ Wrapper options:
 - `--ssh` enables SSH agent forwarding by mounting `/run/host-services/ssh-auth.sock` and `~/.ssh/known_hosts` when available
 - `--profile NAME` (Codex only) uses a named profile with a separate `~/.codex-NAME` config directory, giving you isolated auth, state, and skills per profile
 - `--list-profiles` (Codex only) lists available Codex profiles
+- `--space` diagnoses Docker Desktop storage on macOS, previews old launcher images, and manages opt-in image retention; see [Docker space cleanup](docs/SPACE.md)
 - `--version` prints the installed launcher version without requiring Docker or a git repo
 - `--` passes the remaining arguments to the underlying CLI
 
@@ -202,6 +204,58 @@ Examples:
 ./dcodex --profile magi --ssh
 ./dcodex --list-profiles
 ```
+
+## Docker Space Cleanup
+
+Regular use fills the disk. Every launcher release rebuilds the image, and
+releases ship most weekdays because the pinned Claude Code and Codex versions
+move that often: five or six releases a week in August 2026. Each rebuild leaves
+about 1.5 GB of layers that no other build shares, because the Dockerfile
+installs both CLIs in one layer, and BuildKit keeps those layers as build cache
+even after the image is deleted. Taking every update therefore adds roughly 8 to
+10 GB a week. One Mac that took only 15 of the 52 releases over eleven weeks
+still reached 44 GiB of `Docker.raw`: 20 GB of it in 13 unused `dclaude`
+versions, plus 27 GB reported as reclaimable build cache, most of it the same
+layers. The 460 GiB disk had 3.8 GiB left.
+
+The preventive option is opt-in image retention: keep the newest N builds and
+delete older labelled launcher images. After you enable a saved policy,
+`dclaude` runs retention only after a successful default-image build and warm
+container bootstrap, including the rebuild that follows an accepted launcher
+update. The newest builds stay, and so does any image a running or stopped
+container still uses. Automatic retention never deletes build cache,
+containers, or volumes.
+
+```bash
+dclaude --space retention status           # disabled until explicitly enabled
+dclaude --space retention enable --keep 2  # save policy for this Docker setup
+dclaude --space retention disable          # stop automatic cleanup; nothing is deleted
+```
+
+Images built by launchers before this version carry no ownership label, so
+automatic retention leaves them alone. Retire them once by hand, then let
+retention take over:
+
+```bash
+dclaude --space                          # read-only diagnosis and image preview
+dclaude --space images --keep 2 --apply  # fresh plan and interactive confirmation
+dclaude --space cache                    # inspect cache after image cleanup
+dclaude --space cache --apply            # separate confirmation for builder-wide cache
+dclaude --space verify                   # remeasure the latest cleanup receipt
+dclaude --space --help
+```
+
+Cleanup preserves running and stopped containers, volumes, and protected image
+aliases. A stopped warm container keeps its image alive, so run `dclaude --stop`
+in repos you no longer use. Manual cache cleanup can affect rebuild speed for any
+project on the default builder. Enabled retention runs on macOS Docker Desktop
+and needs host Python 3; elsewhere it does nothing. Use Docker's native BuildKit
+GC budget for recurring cache eviction. The update-only `--yes` flag does not
+authorize deletion.
+
+See [Recover Docker space on a Mac](docs/SPACE.md) for all options, supported
+setups, image protections, recovery measurements, receipts, and a native Docker
+cache-budget example.
 
 ## Folder Mount Config
 
@@ -330,6 +384,7 @@ Primary docs live under [`docs/`](docs/):
 
 - [How To Run](docs/HOWRUN.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [Docker Space Cleanup](docs/SPACE.md)
 - [Motivation](docs/motivation.md)
 - [License](docs/LICENSE)
 - [Version](docs/VERSION)
@@ -407,7 +462,7 @@ dclaude --update-launcher
 dclaude --update-launcher --yes
 ```
 
-`--update-launcher` uses `git -C "$TOOL_HOME" pull --ff-only` for git-clone installs, `brew update && brew upgrade dclaude` for Homebrew installs, and prints the release URL for other install shapes. When the launcher offers an update during a normal interactive start and you accept it, it restarts itself automatically with the updated code instead of asking you to rerun the command manually.
+`--update-launcher` uses `git -C "$TOOL_HOME" pull --ff-only` for git-clone installs, `brew update && brew upgrade dclaude` for Homebrew installs, and prints the release URL for other install shapes. When the launcher offers an update during a normal interactive start and you accept it, it restarts itself automatically with the updated code instead of asking you to rerun the command manually. If image retention is enabled, the restarted launcher builds the new image and then retires labelled launcher builds that fall outside the saved policy; see [Docker Space Cleanup](#docker-space-cleanup).
 
 ## Tool Pin Refreshes
 
@@ -434,7 +489,7 @@ A scheduled GitHub Actions workflow runs the same updater, validates that the im
 Release shape:
 
 - `docs/VERSION` is the source of truth for the launcher version
-- CI on pull requests and `main` runs `shellcheck`, `bash -n`, `docker build`, `--help`, and `--version`
+- CI on pull requests and `main` runs `shellcheck`, `bash -n`, Python unit tests, macOS storage probes, `docker build`, `--help`, and `--version`
 - a scheduled tool-update workflow refreshes pinned upstream tool versions and opens a PR when updates are available
 - a successful non-bot push to `main` bumps the patch version, commits `chore: release vX.Y.Z`, and pushes the matching `vX.Y.Z` tag
 - the tag workflow creates `dclaude-vX.Y.Z.tar.gz`, publishes the GitHub Release, and updates `stanislavkozlovski/homebrew-tap` when `HOMEBREW_TAP_TOKEN` is configured

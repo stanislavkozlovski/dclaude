@@ -19,8 +19,14 @@ read_version() {
   printf '%s\n' "$version"
 }
 
+DCLAUDE_IMAGE_IS_DEFAULT=0
+if [ -z "${DCLAUDE_IMAGE_NAME:-}" ] && [ -z "${DCLAUDE_VERSION:-}" ]; then
+  DCLAUDE_IMAGE_IS_DEFAULT=1
+fi
 DCLAUDE_VERSION="${DCLAUDE_VERSION:-$(read_version)}"
 DCLAUDE_IMAGE_NAME="${DCLAUDE_IMAGE_NAME:-dclaude:${DCLAUDE_VERSION}}"
+# shellcheck source=scripts/space-lock.sh
+source "$TOOL_HOME/scripts/space-lock.sh"
 DEFAULT_HOME_MOUNTS=()
 TILDE_HOME='~'
 CONFIGURED_HOME_MOUNTS=("${DEFAULT_HOME_MOUNTS[@]}")
@@ -47,6 +53,7 @@ usage() {
   local tool="$1"
   cat <<EOF
 usage: $tool [--rebuild] [--reset] [--stop] [--check-update] [--update-launcher] [--update-tool] [--yes] [--ssh] [--] [tool args...]
+       $tool --space [images|cache|verify|retention] [space options...]
 
 Options:
   --rebuild  rebuild the Docker image and recreate the warm container
@@ -59,6 +66,7 @@ Options:
   --ssh      forward the host SSH agent socket and known_hosts when available
   --profile NAME  use a named Codex profile (separate ~/.codex-NAME directory)
   --list-profiles  list available Codex profiles
+  --space    diagnose Docker storage; preview images/cache and manage opt-in image retention
   --help     show this wrapper help
   --version  show the wrapper version
 
@@ -75,7 +83,53 @@ Examples:
   $tool --ssh
   $tool --profile magi
   $tool --list-profiles
+  $tool --space
+  $tool --space images --keep 2 --apply
+  $tool --space cache --apply
+  $tool --space retention status
+  $tool --space --help
+
+Enable automatic image retention with "$tool --space retention enable --keep N".
+It then retires old labelled images after successful builds; cache cleanup stays manual.
+Inspect or stop it with "$tool --space retention status|disable".
+Storage commands run on the host, outside any repository, and require Python 3.
+Manual cleanup requires its own confirmation; --yes only authorizes updates.
+Run "$tool --space --help" for the complete command guide. See $TOOL_HOME/docs/SPACE.md.
 EOF
+}
+
+dispatch_space() {
+  local position=0
+  local argument
+  local found=0
+
+  # Look before parsing wrapper help: mixed --help/--space flags must not hide
+  # invalid combinations, and everything following -- stays agent input.
+  for argument in "$@"; do
+    [ "$argument" != "--" ] || break
+    if [ "$argument" = "--space" ]; then
+      [ "$position" -eq 0 ] || die "--space cannot be combined with wrapper options or agent arguments; use it first"
+      found=1
+      break
+    fi
+    position=$((position + 1))
+  done
+  [ "$found" -eq 1 ] || return 0
+  shift
+  for argument in "$@"; do
+    case "$argument" in
+      --current-image|--current-image=*|--wrapper|--wrapper=*|--auto-retain|--auto-retain=*)
+        die "$argument is an internal Docker space option and cannot be supplied through the wrapper"
+        ;;
+      --ssh|--rebuild|--reset|--stop|--check-update|--update-launcher|--update-tool|--yes|--profile|--profile=*|--list-profiles|--version|-v|--space)
+        die "--space cannot be combined with $argument; --yes only authorizes updates"
+        ;;
+    esac
+  done
+  ensure_command python3
+  exec python3 "$TOOL_HOME/scripts/space.py" \
+    --current-image "$DCLAUDE_IMAGE_NAME" \
+    --wrapper "$WRAPPER_NAME" "$@"
 }
 
 print_version() {
@@ -1045,8 +1099,64 @@ image_exists() {
 }
 
 build_image() {
+  local release_after=0
+  local built_id
+  local -a build_args
+
+  if [ "$SPACE_LOCK_HELD" -eq 0 ]; then
+    acquire_space_lock
+    release_after=1
+  fi
   echo "Building $DCLAUDE_IMAGE_NAME from $TOOL_HOME" >&2
-  docker build -t "$DCLAUDE_IMAGE_NAME" "$TOOL_HOME"
+  build_args=(build -t "$DCLAUDE_IMAGE_NAME")
+  if [ "$DCLAUDE_IMAGE_IS_DEFAULT" -eq 1 ]; then
+    build_args+=(--label "com.dclaude.managed=true" --label "com.dclaude.release=$DCLAUDE_VERSION")
+  fi
+  docker "${build_args[@]}" "$TOOL_HOME"
+  if [ "$DCLAUDE_IMAGE_IS_DEFAULT" -eq 1 ] && [ -z "${BUILDX_BUILDER:-}" ] && [ "${DOCKER_BUILDKIT:-1}" != "0" ]; then
+    built_id="$(image_identity)"
+    if [[ "$built_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+      if ! (umask 077; printf '%s\n' "$built_id" > "$SPACE_STATE_DIR/pending-build.$$") ||
+        ! mv "$SPACE_STATE_DIR/pending-build.$$" "$SPACE_STATE_DIR/pending-build"; then
+        echo "warning: could not record completed build; automatic image retention skipped" >&2
+        rm -f "$SPACE_STATE_DIR/pending-build.$$"
+      fi
+    else
+      echo "warning: Docker returned an unrecognized image identity; automatic image retention skipped" >&2
+    fi
+  fi
+  if [ "$release_after" -eq 1 ]; then
+    release_space_lock
+  fi
+}
+
+maybe_retain_images() {
+  local pending_id
+  local current_id
+
+  [ "$DCLAUDE_IMAGE_IS_DEFAULT" -eq 1 ] || return 0
+  [ -z "${BUILDX_BUILDER:-}" ] && [ "${DOCKER_BUILDKIT:-1}" != "0" ] || return 0
+  # Only a saved enabled policy grants automatic deletion authority. The
+  # helper validates the complete policy again while holding the shared lock.
+  [ -f "$SPACE_STATE_DIR/policy.json" ] || return 0
+  grep -Eq '"enabled"[[:space:]]*:[[:space:]]*true([[:space:]]*[,}]|[[:space:]]*$)' \
+    "$SPACE_STATE_DIR/policy.json" || return 0
+  [ -f "$SPACE_STATE_DIR/pending-build" ] || return 0
+  if ! pending_id="$(cat "$SPACE_STATE_DIR/pending-build" 2>/dev/null)" ||
+    ! current_id="$(docker image inspect --format '{{.Id}}' "$DCLAUDE_IMAGE_NAME" 2>/dev/null)"; then
+    echo "warning: automatic image retention skipped: completed build identity could not be verified" >&2
+    return 0
+  fi
+  [ "$pending_id" = "$current_id" ] || return 0
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "warning: automatic image retention skipped: host Python 3 is unavailable" >&2
+    return 0
+  fi
+  if ! python3 "$TOOL_HOME/scripts/space.py" \
+    --current-image "$DCLAUDE_IMAGE_NAME" \
+    --wrapper "$WRAPPER_NAME" --auto-retain; then
+    echo "warning: automatic image retention did not complete; continuing agent launch (see $WRAPPER_NAME --space retention status)" >&2
+  fi
 }
 
 ensure_target_repo() {
@@ -1331,6 +1441,7 @@ launch_agent() {
 
   WRAPPER_NAME="d${tool}"
   ORIGINAL_WRAPPER_ARGS=("$@")
+  dispatch_space "$@"
   parse_wrapper_args "$@"
   validate_wrapper_args
 
@@ -1383,6 +1494,10 @@ launch_agent() {
   ensure_required_paths
   ensure_host_state "$tool"
 
+  # Hold one lock from image selection through successful bootstrap so a
+  # cleaner cannot remove a launch image between inspection and docker run.
+  acquire_space_lock
+
   if [ "$REBUILD_IMAGE" -eq 1 ]; then
     build_image
     RESET_WARM_CONTAINER=1
@@ -1391,6 +1506,8 @@ launch_agent() {
   fi
 
   ensure_warm_container "$tool"
+  release_space_lock
+  maybe_retain_images
   append_launch_command "$tool"
   emit_startup_banner "$tool"
 

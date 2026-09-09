@@ -25,6 +25,72 @@ jobs:
       - name: Bash syntax
         run: bash -n dclaude dcodex scripts/*.sh
 
+  storage_tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Storage unit and wrapper tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+  storage_macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Real macOS filesystem and APFS probes
+        run: python3 -m unittest discover -s tests -p 'test_space_macos.py' -v
+
+  storage_desktop:
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install pinned Docker Desktop
+        run: |
+          curl --fail --location --retry 3 \
+            https://desktop.docker.com/mac/main/amd64/238018/Docker.dmg \
+            --output "$RUNNER_TEMP/Docker.dmg"
+          echo "cb22c74b9c6c9c2768d64459828b6c2b0ab4d5b7ace4b28f0979d7de4f28e336  $RUNNER_TEMP/Docker.dmg" | shasum -a 256 -c -
+          sudo hdiutil attach "$RUNNER_TEMP/Docker.dmg" -nobrowse
+          sudo /Volumes/Docker/Docker.app/Contents/MacOS/install --accept-license --user="$USER"
+          # The installer can hold the volume briefly; a mounted installer image
+          # does not affect the Desktop daemon under test.
+          sudo hdiutil detach /Volumes/Docker || {
+            sleep 15
+            sudo hdiutil detach /Volumes/Docker -force || echo 'warning: installer image still mounted' >&2
+          }
+          echo /Applications/Docker.app/Contents/Resources/bin >> "$GITHUB_PATH"
+      - name: Start Docker Desktop
+        run: |
+          open /Applications/Docker.app
+          for attempt in {1..120}; do
+            if docker info >/dev/null 2>&1; then
+              docker version
+              docker buildx version
+              docker context show
+              docker buildx inspect default
+              exit 0
+            fi
+            sleep 5
+          done
+          echo 'Docker Desktop did not become ready within 10 minutes.' >&2
+          exit 1
+      - name: Verify storage on disposable Docker Desktop data
+        shell: bash
+        env:
+          DCLAUDE_SPACE_DISPOSABLE_TEST: "1"
+        run: python3 tests/space_desktop_smoke.py 2>&1 | tee "$RUNNER_TEMP/space-desktop-smoke.log"
+      - name: Preserve Desktop validation output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: storage-desktop-validation
+          path: |
+            ${{ runner.temp }}/space-desktop-smoke.log
+            ${{ runner.temp }}/space-desktop-evidence.json
+          if-no-files-found: ignore
+
   smoke:
     runs-on: ubuntu-latest
     steps:
@@ -70,6 +136,9 @@ jobs:
     needs:
       - lint
       - smoke
+      - storage_tests
+      - storage_macos
+      - storage_desktop
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
