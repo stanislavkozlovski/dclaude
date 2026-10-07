@@ -1,6 +1,7 @@
 name: ci
 
 on:
+  workflow_dispatch:
   pull_request:
     branches:
       - main
@@ -132,7 +133,11 @@ jobs:
           ./dcodex --version
 
   release_from_main:
-    if: "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'github-actions[bot]' && !startsWith(github.event.head_commit.message, 'chore: release v') }}"
+    if: >
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'push' && github.actor != 'github-actions[bot]' &&
+        !startsWith(github.event.head_commit.message, 'chore: release v')))
     needs:
       - lint
       - smoke

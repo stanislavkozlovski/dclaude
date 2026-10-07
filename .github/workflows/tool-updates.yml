@@ -6,6 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: write
   contents: write
   pull-requests: write
 
@@ -16,7 +17,6 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ github.event.repository.default_branch }}
-          token: ${{ secrets.TOOL_UPDATE_TOKEN }}
 
       - name: Refresh pinned tool versions
         id: refresh
@@ -43,10 +43,11 @@ jobs:
           docker run --rm dclaude:tool-updates bash -lc 'codex --version && codex --dangerously-bypass-approvals-and-sandbox --help >/dev/null'
 
       - name: Create pull request
+        id: pull_request
         if: steps.diff.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v7
         with:
-          token: ${{ secrets.TOOL_UPDATE_TOKEN }}
+          token: ${{ github.token }}
           branch: chore/tool-version-updates
           delete-branch: true
           commit-message: ${{ steps.refresh.outputs.commit_message }}
@@ -54,3 +55,10 @@ jobs:
           author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
           title: ${{ steps.refresh.outputs.commit_title }}
           body: ${{ steps.refresh.outputs.pull_request_body }}
+
+      - name: Run CI for the tool update
+        if: steps.pull_request.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # Bot-created PR events do not run CI without approval. Dispatch it explicitly.
+        run: gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref chore/tool-version-updates
