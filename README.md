@@ -484,6 +484,8 @@ dclaude --update-tool
 
 A scheduled GitHub Actions workflow runs the same updater, validates that the image still builds, and opens a PR when upstream `@anthropic-ai/claude-code`, `@openai/codex`, or `cx` releases move. The generated commit title and PR body list each pinned package transition, such as `claude-code 2.1.141->2.1.142`.
 
+The updater and merger use the per-run `GITHUB_TOKEN`; no `TOOL_UPDATE_TOKEN` secret is needed. The repository must allow GitHub Actions to create pull requests. The updater explicitly dispatches `ci.yml` on `chore/tool-version-updates`, and successful CI merges only the matching PR head. After merging, it dispatches CI on `main` to validate and publish the launcher release, because a push made with `GITHUB_TOKEN` does not trigger another workflow.
+
 ## Releases
 
 Release shape:
@@ -491,7 +493,7 @@ Release shape:
 - `docs/VERSION` is the source of truth for the launcher version
 - CI on pull requests and `main` runs `shellcheck`, `bash -n`, Python unit tests, macOS storage probes, `docker build`, `--help`, and `--version`
 - a scheduled tool-update workflow refreshes pinned upstream tool versions and opens a PR when updates are available
-- a successful non-bot push to `main` bumps the patch version, commits `chore: release vX.Y.Z`, and pushes the matching `vX.Y.Z` tag
+- a successful non-bot push or explicit CI dispatch to `main` bumps the patch version, commits `chore: release vX.Y.Z`, and pushes the matching `vX.Y.Z` tag
 - the tag workflow creates `dclaude-vX.Y.Z.tar.gz`, publishes the GitHub Release, and updates `stanislavkozlovski/homebrew-tap` when `HOMEBREW_TAP_TOKEN` is configured
 
 Homebrew installs both wrappers from the same release tarball and exposes both `dclaude` and `dcodex`.
