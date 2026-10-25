@@ -132,16 +132,25 @@ jobs:
           ./dclaude --version
           ./dcodex --version
 
-  merge_tool_update:
-    if: >
-      github.event_name == 'workflow_dispatch' &&
-      github.ref == 'refs/heads/chore/tool-version-updates'
+  # Jobs that write to the repo depend on this gate. List every validation job
+  # here so tool-update merges and releases wait for all of them.
+  validated:
     needs:
       - lint
       - smoke
       - storage_tests
       - storage_macos
       - storage_desktop
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "All validation jobs passed."
+
+  merge_tool_update:
+    if: >
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/chore/tool-version-updates'
+    needs:
+      - validated
     runs-on: ubuntu-latest
     permissions:
       actions: write
@@ -157,7 +166,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           BASE_BRANCH: ${{ github.event.repository.default_branch }}
-          HEAD_REPOSITORY: ${{ github.repository }}
           HEAD_SHA: ${{ github.sha }}
         run: bash scripts/merge_tool_update.sh
 
@@ -168,11 +176,7 @@ jobs:
        (github.event_name == 'push' && github.actor != 'github-actions[bot]' &&
         !startsWith(github.event.head_commit.message, 'chore: release v')))
     needs:
-      - lint
-      - smoke
-      - storage_tests
-      - storage_macos
-      - storage_desktop
+      - validated
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.meta.outputs.tag }}

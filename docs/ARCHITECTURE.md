@@ -9,7 +9,7 @@ This repo provides a Dockerized wrapper around the official Claude Code and Code
 - one shared shell helper for runtime assembly
 - one host Python helper for Docker storage reports, measured cleanup, and image retention
 - one `docs/VERSION` file that drives image naming and releases
-- four GitHub Actions workflows for CI, scheduled tool refreshes, green tool-update auto-merges, and tagged releases
+- three GitHub Actions workflows for CI and green tool-update merges, scheduled tool refreshes, and tagged releases
 
 The design goal is path fidelity. The target repo and configured read-only directories are mounted into the container at the same absolute paths they have on the host. When no launcher config is present, no extra host directories are mounted. `/workspace` exists only as a compatibility alias.
 
@@ -129,17 +129,23 @@ Checks the pinned upstream tool versions and can rewrite the repo when newer ver
 
 ### `.github/workflows/ci.yml`
 
-Runs shell linting, Python unit tests, macOS filesystem/APFS probes, and smoke
-checks on pull requests and `main`. On successful non-bot pushes to `main`, it also
-bumps the patch version and pushes the matching release tag.
+Runs shell linting, Python unit tests, macOS filesystem/APFS probes, Docker Desktop
+storage validation, and smoke checks on pull requests, pushes to `main`, and manual
+dispatches. Jobs that write to the repo depend on the `validated` gate, which depends
+on every validation job; add new validation jobs to its `needs` list. On successful
+non-bot pushes and dispatched runs on `main`, it bumps the patch version and pushes
+the matching release tag.
+
+On a dispatched run of `chore/tool-version-updates`, the `merge_tool_update` job runs
+`scripts/merge_tool_update.sh` from the default branch. The script squash-merges the
+single open tool-update pull request only if its head is the exact commit that
+passed CI, deletes the branch, and dispatches CI on `main` to publish the release.
+Work done with `GITHUB_TOKEN` starts no `workflow_run` or push-triggered runs, so
+the merge lives in this job and the script dispatches CI on `main` explicitly.
 
 ### `.github/workflows/tool-updates.yml`
 
-Runs on a schedule and on manual dispatch. It refreshes pinned upstream tool versions, verifies the updated image still builds, and opens a pull request when changes are detected. The updater writes the pull request title, commit message, and body from the detected old-to-new version transitions. It creates the pull request with `TOOL_UPDATE_TOKEN` so the normal pull request CI workflow runs.
-
-### `.github/workflows/tool-update-automerge.yml`
-
-Runs after the `ci` workflow completes. When CI succeeds for the `chore/tool-version-updates` branch, it verifies that the pull request head is the exact commit that passed CI, merges that pull request with `TOOL_UPDATE_TOKEN`, and deletes the branch. This makes tool-update pull requests merge on green without human review. `TOOL_UPDATE_TOKEN` must belong to an account that can push branches, open pull requests, and merge this repo; if branch rules require reviews, that account must be allowed to bypass those review rules.
+Runs on a schedule and on manual dispatch. It refreshes pinned upstream tool versions, verifies the updated image still builds, and opens a pull request when changes are detected. The updater writes the pull request title, commit message, and body from the detected old-to-new version transitions. It creates the pull request with `GITHUB_TOKEN`, then dispatches `ci.yml` on `chore/tool-version-updates` because the bot-created pull request does not start CI on its own.
 
 ### `.github/workflows/release.yml`
 

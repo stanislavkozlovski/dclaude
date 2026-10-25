@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${GITHUB_REPOSITORY:?}" "${BASE_BRANCH:?}" "${HEAD_REPOSITORY:?}" "${HEAD_SHA:?}"
-test "$HEAD_REPOSITORY" = "$GITHUB_REPOSITORY"
+: "${GITHUB_REPOSITORY:?}" "${BASE_BRANCH:?}" "${HEAD_SHA:?}"
 
 # Resolve the PR by branch, then verify its current head against the commit
 # that actually passed all CI checks.

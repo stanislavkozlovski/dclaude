@@ -48,8 +48,7 @@ else:
             "PATH": f"{self.directory}:{os.environ['PATH']}",
             "GH_TEST_LOG": str(self.log),
             "GH_TEST_PRS": json.dumps([{"number": 104}]),
-            "GITHUB_REPOSITORY": REPOSITORY, "BASE_BRANCH": "main",
-            "HEAD_REPOSITORY": REPOSITORY, "HEAD_SHA": HEAD_SHA,
+            "GITHUB_REPOSITORY": REPOSITORY, "BASE_BRANCH": "main", "HEAD_SHA": HEAD_SHA,
         }
 
     def run_merge(self):
@@ -102,11 +101,6 @@ else:
                 self.assertNotEqual(self.run_merge().returncode, 0)
                 self.assert_no_writes()
                 target[keys[-1]] = previous
-
-    def test_fork_ci_is_rejected_before_reading_pr(self):
-        self.env["HEAD_REPOSITORY"] = "someone/dclaude"
-        self.assertNotEqual(self.run_merge().returncode, 0)
-        self.assertEqual(self.calls(), [])
 
     def test_missing_or_ambiguous_pr_never_merges(self):
         for prs in ([], [{"number": 104}, {"number": 105}]):
