@@ -484,7 +484,7 @@ dclaude --update-tool
 
 A scheduled GitHub Actions workflow runs the same updater, validates that the image still builds, and opens a PR when upstream `@anthropic-ai/claude-code`, `@openai/codex`, or `cx` releases move. The generated commit title and PR body list each pinned package transition, such as `claude-code 2.1.141->2.1.142`.
 
-The updater and merger use the per-run `GITHUB_TOKEN`; no `TOOL_UPDATE_TOKEN` secret is needed. The repository must allow GitHub Actions to create pull requests. The updater explicitly dispatches `ci.yml` on `chore/tool-version-updates`, and successful CI merges only the matching PR head. After merging, it dispatches CI on `main` to validate and publish the launcher release, because a push made with `GITHUB_TOKEN` does not trigger another workflow.
+The updater and merger use the per-run `GITHUB_TOKEN`; no `TOOL_UPDATE_TOKEN` secret is needed. The repository must allow GitHub Actions to create pull requests. The updater explicitly dispatches `ci.yml` on `chore/tool-version-updates`. Its `merge_tool_update` job waits for lint, Docker smoke, storage unit tests, macOS probes, and Docker Desktop validation to succeed, then merges only the matching PR head using the merge script from the default branch. The merge runs inside CI because a CI run dispatched with `GITHUB_TOKEN` does not trigger a separate `workflow_run` workflow. After merging, it dispatches CI on `main` to validate and publish the launcher release, because a push made with `GITHUB_TOKEN` does not trigger another workflow.
 
 ## Releases
 

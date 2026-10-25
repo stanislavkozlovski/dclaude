@@ -4,8 +4,8 @@ set -euo pipefail
 : "${GITHUB_REPOSITORY:?}" "${BASE_BRANCH:?}" "${HEAD_REPOSITORY:?}" "${HEAD_SHA:?}"
 test "$HEAD_REPOSITORY" = "$GITHUB_REPOSITORY"
 
-# Dispatched CI runs have no pull_requests payload. Resolve the PR by branch,
-# then verify its current head against the commit that actually passed CI.
+# Resolve the PR by branch, then verify its current head against the commit
+# that actually passed all CI checks.
 pr_number="$(gh pr list --repo "$GITHUB_REPOSITORY" --base "$BASE_BRANCH" \
   --head chore/tool-version-updates --state open --limit 2 --json number | \
   jq -er 'if length == 1 then .[0].number else error("expected exactly one open tool update PR") end')"
